@@ -1,33 +1,33 @@
 # note-cli
 
-A CLI and agent plugin for [note.com](https://note.com) built on its **unofficial** API, made to be driven by AI coding agents such as Claude Code, Codex, Cursor and Gemini CLI. Every command prints JSON.
+[note.com](https://note.com) の**非公式** API を使った CLI とエージェント用プラグインです。Claude Code、Codex、Cursor、Gemini CLI などの AI コーディングエージェントから操作することを想定しています。すべてのコマンドは JSON を出力します。
 
-- **Drafts**: convert Markdown to note's editor HTML and save it as a draft, uploading local images and the eyecatch.
-- **Publishing**: publish with hashtags, price and paywall, table of contents and magazines; schedule posts; take articles down or delete them.
-- **Engagement**: like, comment, follow, add articles to your magazines, and check notifications and memberships.
-- **Research**: search articles, creators, magazines and hashtags; browse hashtags, categories, magazines and contests; read article text, likes and comments.
-- **Analysis**: like-count distribution, paid ratio, title patterns, posting weekday/hour, top authors and articles.
-- **Your stats**: page views, likes and comments per article.
+- **下書き**: Markdown を note のエディタ用 HTML に変換して下書き保存します。ローカル画像とアイキャッチもアップロードします。
+- **公開**: ハッシュタグ、価格と有料エリア、目次、マガジンを指定して公開します。予約投稿、非公開化、削除もできます。
+- **交流**: スキ、コメント、フォロー、自分のマガジンへの記事追加、通知とメンバーシップの確認ができます。
+- **リサーチ**: 記事・クリエイター・マガジン・ハッシュタグの検索、ハッシュタグ・カテゴリ・マガジン・コンテストの閲覧、記事本文・スキ・コメントの取得ができます。
+- **分析**: スキ数の分布、有料記事の割合、タイトルの傾向、投稿曜日・時間帯、上位の著者と記事を集計します。
+- **自分の数字**: 記事ごとのビュー数、スキ数、コメント数を確認できます。
 
-> ⚠️ This is not an official note.com API. It can break without notice. Keep usage personal and low-volume, and follow note.com's terms of service.
+> ⚠️ note.com の公式 API ではありません。予告なく動かなくなる可能性があります。個人的な用途で少量の利用にとどめ、note.com の利用規約に従ってください。
 
-References: [shimayuz/note-com-mcp](https://github.com/shimayuz/note-com-mcp), [note 非公式 API を徹底調査](https://note.com/marie_222/n/n6a10366298b0)
+参考: [shimayuz/note-com-mcp](https://github.com/shimayuz/note-com-mcp)、[note 非公式 API を徹底調査](https://note.com/marie_222/n/n6a10366298b0)
 
-## Install
+## インストール
 
-The plugin bundles the CLI as a single dependency-free file (`dist/note-cli.js`). The only requirement is [Bun](https://bun.sh) 1.2 or later:
+プラグインには依存パッケージのない単一ファイルの CLI（`dist/note-cli.js`）が同梱されています。必要なのは [Bun](https://bun.sh) 1.2 以降だけです。
 
 ```bash
 curl -fsSL https://bun.sh/install | bash
 ```
 
-Installation differs by agent. If you use more than one, install note-cli separately for each.
+インストール方法はエージェントごとに異なります。複数のエージェントを使う場合は、それぞれにインストールしてください。
 
-| Agent | Install |
+| エージェント | インストール |
 |---|---|
 | [Claude Code](#claude-code) | `/plugin marketplace add shoot16625/note-cli` |
 | [Codex](#codex) | `codex plugin marketplace add shoot16625/note-cli` |
-| [Cursor](#cursor) | `/add-plugin` from this repository |
+| [Cursor](#cursor) | このリポジトリから `/add-plugin` |
 | [Gemini CLI](#gemini-cli) | `gemini extensions install https://github.com/shoot16625/note-cli` |
 | [GitHub Copilot CLI](#github-copilot-cli) | `copilot plugin marketplace add shoot16625/note-cli` |
 | [Factory Droid](#factory-droid) | `droid plugin marketplace add https://github.com/shoot16625/note-cli` |
@@ -36,7 +36,7 @@ Installation differs by agent. If you use more than one, install note-cli separa
 | [Kimi Code](#kimi-code) | `/plugins install https://github.com/shoot16625/note-cli` |
 | [Antigravity](#antigravity) | `agy plugin install https://github.com/shoot16625/note-cli` |
 | [Pi](#pi) | `pi install git:github.com/shoot16625/note-cli` |
-| [Anything else](#other-agents-opencode-windsurf-cline-) | `npx skills add shoot16625/note-cli` |
+| [その他](#その他のエージェントopencodewindsurfcline-など) | `npx skills add shoot16625/note-cli` |
 
 ### Claude Code
 
@@ -51,11 +51,11 @@ Installation differs by agent. If you use more than one, install note-cli separa
 codex plugin marketplace add shoot16625/note-cli
 ```
 
-Then open `/plugins` (CLI) or **Plugins** in the sidebar (app) and install **note-cli**.
+続けて `/plugins`（CLI）またはサイドバーの **Plugins**（アプリ）を開き、**note-cli** をインストールします。
 
 ### Cursor
 
-In Cursor Agent chat:
+Cursor の Agent チャットで次を実行します。
 
 ```text
 /add-plugin https://github.com/shoot16625/note-cli
@@ -65,7 +65,7 @@ In Cursor Agent chat:
 
 ```bash
 gemini extensions install https://github.com/shoot16625/note-cli
-gemini extensions update note-cli   # later
+gemini extensions update note-cli   # 更新するとき
 ```
 
 ### GitHub Copilot CLI
@@ -84,18 +84,18 @@ droid plugin install note-cli@note-cli
 
 ### Qwen Code
 
-Qwen Code installs plugins from Claude Code marketplaces directly. Pick `note-cli` when prompted:
+Qwen Code は Claude Code のマーケットプレイスから直接プラグインをインストールできます。選択を求められたら `note-cli` を選んでください。
 
 ```bash
 qwen extensions install shoot16625/note-cli
-qwen extensions update note-cli   # later
+qwen extensions update note-cli   # 更新するとき
 ```
 
 ### Devin CLI
 
 ```bash
 devin plugins install shoot16625/note-cli
-devin plugins update note-cli   # later
+devin plugins update note-cli   # 更新するとき
 ```
 
 ### Kimi Code
@@ -110,7 +110,7 @@ devin plugins update note-cli   # later
 agy plugin install https://github.com/shoot16625/note-cli
 ```
 
-Reinstall with the same command to update.
+更新するときは同じコマンドで再インストールします。
 
 ### Pi
 
@@ -118,172 +118,174 @@ Reinstall with the same command to update.
 pi install git:github.com/shoot16625/note-cli
 ```
 
-### Other agents (OpenCode, Windsurf, Cline, ...)
+### その他のエージェント（OpenCode、Windsurf、Cline など）
 
-Any agent that reads `SKILL.md` skills can install them with the [`skills`](https://github.com/vercel-labs/skills) CLI, which asks which agents to install for:
+`SKILL.md` 形式のスキルを読み込めるエージェントなら、[`skills`](https://github.com/vercel-labs/skills) CLI でインストールできます。どのエージェントに入れるかは対話的に選べます。
 
 ```bash
 npx skills add shoot16625/note-cli
 ```
 
-This copies only the skills, not the bundled CLI, so also install the CLI (the skills will offer to do it on first use):
+この方法ではスキルだけがコピーされ、同梱の CLI は入りません。CLI も別途インストールしてください（初回利用時にスキルがインストールを提案します）。
 
 ```bash
 bun add -g github:shoot16625/note-cli
 ```
 
-### CLI only (optional)
+### CLI のみ（任意）
 
-To use `note-cli` directly in your shell:
+シェルから `note-cli` を直接使う場合:
 
 ```bash
 bun add -g github:shoot16625/note-cli
 ```
 
-## Skills
+## スキル
 
-| Skill | What it does |
+| スキル | できること |
 |---|---|
-| `note-cli:draft` | Save, update and read back Markdown drafts |
-| `note-cli:publish` | Publish, schedule, unpublish and delete articles; manage magazines |
-| `note-cli:engage` | Like, comment, follow; notifications and memberships |
-| `note-cli:research` | Search and analyze articles, hashtags and creators |
-| `note-cli:my-stats` | Review your own page views, likes and comments |
+| `note-cli:draft` | Markdown の下書きを保存・更新・取得 |
+| `note-cli:publish` | 記事の公開・予約投稿・非公開化・削除、マガジン管理 |
+| `note-cli:engage` | スキ、コメント、フォロー、通知とメンバーシップ |
+| `note-cli:research` | 記事・ハッシュタグ・クリエイターの検索と分析 |
+| `note-cli:my-stats` | 自分の記事のビュー数・スキ数・コメント数を確認 |
 
-Examples: "save `post.md` to note as a draft", "publish it with the hashtags AI and ClaudeCode", or "what kind of note articles about Claude Code get the most likes?"
+使用例:「`post.md` を note に下書き保存して」「ハッシュタグ AI と ClaudeCode を付けて公開して」「Claude Code についての note 記事で、スキが多いのはどんな記事？」
 
-## Login
+## ログイン
 
-Since 2026-05, note's email/password login API requires reCAPTCHA. note-cli therefore opens a real browser and lets you log in by hand.
+2026 年 5 月以降、note のメールアドレス・パスワードによるログイン API には reCAPTCHA が必要になりました。そのため note-cli は実際のブラウザを開き、手動でログインしてもらう方式を取っています。
 
 ```bash
-note-cli auth login                  # opens Chrome/Edge/Chromium on the login page; log in there
+note-cli auth login                  # Chrome/Edge/Chromium でログインページを開くので、そこでログインする
 note-cli auth login --browser "/path/to/chrome"
-note-cli auth import --cookie '_note_session_v5=...; XSRF-TOKEN=...'   # a Cookie header from DevTools, or just the _note_session_v5 value
+note-cli auth import --cookie '_note_session_v5=...; XSRF-TOKEN=...'   # DevTools からコピーした Cookie ヘッダー、または _note_session_v5 の値だけ
 note-cli auth status
 note-cli auth logout
 ```
 
-`auth login` uses a throwaway browser profile and reads the cookies through the Chrome DevTools Protocol. Your normal browser profile is never touched.
+`auth login` は使い捨てのブラウザプロファイルを使い、Chrome DevTools Protocol 経由で Cookie を読み取ります。普段使っているブラウザのプロファイルには一切触れません。
 
-The session is saved to `~/.config/note-cli/session.json` with mode 0600. Setting `NOTE_COOKIE` overrides the saved session.
+セッションは `~/.config/note-cli/session.json` にパーミッション 0600 で保存されます。環境変数 `NOTE_COOKIE` を設定すると、保存済みのセッションより優先されます。
 
-Your note account must have a verified email address before it can create drafts.
+下書きを作成するには、note アカウントのメールアドレス認証が済んでいる必要があります。
 
-## Commands
+## コマンド
 
 ```bash
-# Drafts (login required)
+# 下書き（ログインが必要）
 note-cli draft create article.md [--title T] [--eyecatch cover.png] [--dry-run]
 note-cli draft update <id|key|url> article.md [--eyecatch cover.png]
 note-cli draft get <key|url> [--html] [--max-chars N]
 note-cli draft list [--page N] [--status draft|published]
 note-cli draft delete <id|key|url> --yes
 
-# Publishing (login required; opens a browser window briefly, see below)
+# 公開（ログインが必要。一時的にブラウザが開きます。後述）
 note-cli publish <key|url> [article.md] --yes [--hashtag T]... [--price YEN] [--refund] [--magazine KEY]... \
     [--toc] [--disable-comments] [--no-notify] [--schedule 2026-12-01T09:00+09:00] [--eyecatch cover.png] [--dry-run]
-note-cli reserved                               # scheduled articles
-note-cli unpublish <key|url> --yes              # back to draft (cancels a scheduled post too)
-note-cli delete <key|url> --yes                 # delete; published articles are unpublished first
-note-cli magazines [--note <key>]               # your magazines
+note-cli reserved                               # 予約投稿中の記事
+note-cli unpublish <key|url> --yes              # 下書きに戻す（予約投稿の取り消しにも使える）
+note-cli delete <key|url> --yes                 # 削除（公開中の記事は先に非公開化される）
+note-cli magazines [--note <key>]               # 自分のマガジン
 note-cli magazine add|remove <magazineKey> <noteKey>
 
-# Engagement (login required)
+# 交流（ログインが必要）
 note-cli like|unlike <key|url>
 note-cli comment <key|url> "text" [--reply-to <commentKey>]
 note-cli comment delete <key|url> <commentKey> --yes
 note-cli follow|unfollow <urlname>
-note-cli notices                                # unread counts
+note-cli notices                                # 未読数
 note-cli membership plans|joined
 
-# Research (no login)
+# リサーチ（ログイン不要）
 note-cli search "<query>" [--type note|user|magazine|hashtag] [--sort popular|hot|new] [--limit N] [--start N]
-note-cli hashtag <tag> [--order popular|hot|new] [--limit N] [--paid-only]   # also article count + related tags
+note-cli hashtag <tag> [--order popular|hot|new] [--limit N] [--paid-only]   # 記事数と関連タグも返す
 note-cli user <urlname> [--limit N]
 note-cli note <key|url> [--html] [--max-chars N]
-note-cli likes <key|url> [--limit N]            # who liked an article
-note-cli comments <key|url> [--limit N]         # top-level comments with reply counts
-note-cli magazine <key|url> [--limit N]         # magazine details + its articles
-note-cli categories                             # category slugs
-note-cli category <slug> [--sort new|trend] [--limit N]   # `featured` = note's editorial pick
+note-cli likes <key|url> [--limit N]            # 記事にスキしたユーザー
+note-cli comments <key|url> [--limit N]         # トップレベルのコメントと返信数
+note-cli magazine <key|url> [--limit N]         # マガジンの詳細と収録記事
+note-cli categories                             # カテゴリの slug 一覧
+note-cli category <slug> [--sort new|trend] [--limit N]   # `featured` は note 編集部のおすすめ
 note-cli contests [--state opened|closed|finished|all] [--type contest|theme|all] [--limit N]
 
-# Analysis
+# 分析
 note-cli analyze search "<query>" [--sort ...] [--limit 100] [--top 10]
 note-cli analyze hashtag <tag> [--order ...] [--limit 100]
 note-cli analyze user <urlname> [--limit 100]
-note-cli stats pv [--filter all|daily|weekly|monthly|yearly] [--sort pv|like|comment] [--page N]   # login required
+note-cli stats pv [--filter all|daily|weekly|monthly|yearly] [--sort pv|like|comment] [--page N]   # ログインが必要
 ```
 
-Article bodies are cut at 20,000 characters by default (`--max-chars 0` for no limit); the output reports `bodyChars` and `truncated`. List outputs report `exhausted`, plus `skipped` when rows could not be read, which usually means the unofficial API changed.
+記事本文はデフォルトで 20,000 文字で切り詰められます（`--max-chars 0` で無制限）。出力には `bodyChars` と `truncated` が含まれます。一覧系の出力には `exhausted` が含まれ、読み取れない行があった場合は `skipped` も含まれます。`skipped` が出る場合、たいていは非公式 API の仕様が変わったことを意味します。
 
-Identifiers are validated before any request: note keys (`n...`) or note URLs, urlnames (letters, digits, `_`, `-`), and hashtags without `/ \ ? # %` or whitespace.
+識別子はリクエスト前に検証されます。対象は note のキー（`n...`）または記事 URL、urlname（英数字・`_`・`-`）、ハッシュタグ（`/ \ ? # %` と空白を含まないもの）です。
 
-Errors go to stderr as `{"error": {"code", "message", ...}}`. The exit code is 1 for errors and 2 for usage mistakes. `FORBIDDEN` means note refused the action and gives its reason; `AUTH_ERROR` means the session has expired.
+エラーは `{"error": {"code", "message", ...}}` の形式で stderr に出力されます。終了コードはエラー時が 1、使い方の誤りが 2 です。`FORBIDDEN` は note が操作を拒否したことを示し、その理由も出力されます。`AUTH_ERROR` はセッションの有効期限切れを示します。
 
-### Publishing
+### 公開について
 
-note requires reCAPTCHA v3 to publish, which a plain HTTP client cannot pass. `publish` opens Chrome/Edge/Chromium with a throwaway profile, copies the saved session into it, and sends note's own publish request from inside the editor page. The window closes when it is done. Nothing needs to be clicked. Use `--browser` (or `NOTE_CLI_BROWSER`) if no browser is found.
+note で記事を公開するには reCAPTCHA v3 を通過する必要があり、通常の HTTP クライアントでは通過できません。そこで `publish` は使い捨てプロファイルで Chrome/Edge/Chromium を開き、保存済みセッションをコピーしたうえで、エディタページ内から note 自身の公開リクエストを送信します。処理が終わるとウィンドウは閉じます。クリック操作は不要です。ブラウザが見つからない場合は `--browser`（または `NOTE_CLI_BROWSER`）で指定してください。
 
-- `publish` needs an existing draft. With a Markdown file, the file is saved to the draft first.
-- A line containing only `<!-- paywall -->` marks where the paid part starts. It takes effect with `--price` (100–50000 yen), which requires it.
-- `--dry-run` prints the title, hashtags, price and the free/paid lengths without opening a browser.
-- Scheduled posts (`--schedule`) and turning comments off need note premium. note refuses them otherwise, and the CLI reports `FORBIDDEN`.
-- Paid articles, articles that ever sold, and articles in paid or membership magazines cannot be unpublished or deleted.
-- Commenting may first require accepting note's comment guidelines once in a browser (`COMMENT_GUIDELINES`).
+- `publish` には既存の下書きが必要です。Markdown ファイルを指定した場合は、先にその内容で下書きを保存します。
+- `<!-- paywall -->` だけの行が有料エリアの開始位置になります。`--price`（100〜50000 円）と組み合わせたときに有効で、`--price` を指定する場合は必須です。
+- `--dry-run` はブラウザを開かずに、タイトル、ハッシュタグ、価格、無料部分と有料部分の長さを出力します。
+- 予約投稿（`--schedule`）とコメントの無効化には note プレミアムが必要です。未加入の場合は note に拒否され、CLI は `FORBIDDEN` を返します。
+- 有料記事、一度でも売れたことのある記事、有料マガジンやメンバーシップのマガジンに含まれる記事は、非公開化も削除もできません。
+- コメントするには、事前にブラウザで一度 note のコメントガイドラインに同意する必要がある場合があります（`COMMENT_GUIDELINES`）。
 
-### Markdown conversion
+### Markdown の変換
 
 | Markdown | note |
 |---|---|
-| `#` / `##` | Large heading |
-| `###` | Small heading |
-| `####` and deeper | Bold paragraph |
-| Line break inside a paragraph | Line break (`<br>`) |
-| Lists, quotes, code blocks, bold, strikethrough, horizontal rules | Kept as is |
-| Links | Kept for `http`, `https` and `mailto`; other schemes are dropped, keeping the link text, with a warning |
-| Images with a local path (`![alt](img/a.png "caption")`) | Uploaded to note and embedded as an image block; the title becomes the caption. PNG, JPEG, GIF or WebP, up to 10 MB |
-| Images with a URL | Replaced with a link, with a warning (download the file and reference it locally to embed it) |
-| Tables | **Not supported by note**: rendered as a code block, with a warning |
+| `#` / `##` | 大見出し |
+| `###` | 小見出し |
+| `####` 以降 | 太字の段落 |
+| 段落内の改行 | 改行（`<br>`） |
+| リスト、引用、コードブロック、太字、取り消し線、水平線 | そのまま |
+| リンク | `http`、`https`、`mailto` は保持。それ以外のスキームはリンクを外してテキストだけ残し、警告を出す |
+| ローカルパスの画像（`![alt](img/a.png "caption")`） | note にアップロードして画像ブロックとして埋め込む。title はキャプションになる。PNG、JPEG、GIF、WebP で 10 MB まで |
+| URL の画像 | リンクに置き換え、警告を出す（埋め込みたい場合はファイルをダウンロードしてローカルパスで参照する） |
+| 表 | **note は非対応**。コードブロックとして出力し、警告を出す |
 
-The title comes from `--title`, then frontmatter `title:`, then a leading `# Heading`, which is removed from the body.
+タイトルは `--title`、フロントマターの `title:`、先頭の `# 見出し` の順で決まります。先頭の見出しをタイトルに使った場合、その見出しは本文から削除されます。
 
-Image paths are relative to the Markdown file (the current directory when reading stdin). An image used more than once is uploaded once. The eyecatch (cover image) comes from `--eyecatch` (relative to the current directory) or frontmatter `eyecatch:` (relative to the Markdown file). note only accepts eyecatches with a 1280:670 aspect ratio, such as 1280x670. `--dry-run` reads and checks every image without uploading anything. If note rejects the eyecatch, the draft is still saved and the output carries a warning.
+画像のパスは Markdown ファイルからの相対パスです（stdin から読み込む場合はカレントディレクトリが基準）。同じ画像を複数回使っても、アップロードは 1 回だけです。アイキャッチ（カバー画像）は `--eyecatch`（カレントディレクトリ基準）またはフロントマターの `eyecatch:`（Markdown ファイル基準）で指定します。note が受け付けるアイキャッチは縦横比 1280:670（1280x670 など）のものだけです。`--dry-run` はすべての画像を読み込んで検証しますが、アップロードはしません。note がアイキャッチを拒否した場合でも下書きは保存され、出力に警告が含まれます。
 
-### Environment variables
+### 環境変数
 
-| Variable | Purpose |
+| 変数 | 用途 |
 |---|---|
-| `NOTE_COOKIE` | Cookie header string. Overrides the saved session |
-| `NOTE_CLI_HOME` | Directory where the session is stored |
-| `NOTE_CLI_BROWSER` | Browser executable used by `auth login` and `publish` |
-| `NOTE_CLI_INTERVAL_MS` | Minimum delay between requests (default 500 ms) |
-| `NOTE_CLI_DEBUG` | Log request URLs to stderr |
+| `NOTE_COOKIE` | Cookie ヘッダー文字列。保存済みのセッションより優先される |
+| `NOTE_CLI_HOME` | セッションを保存するディレクトリ |
+| `NOTE_CLI_BROWSER` | `auth login` と `publish` で使うブラウザの実行ファイル |
+| `NOTE_CLI_INTERVAL_MS` | リクエスト間の最小間隔（デフォルト 500 ms） |
+| `NOTE_CLI_DEBUG` | リクエスト URL を stderr に出力する |
 
-## Not supported yet
+## 未対応の機能
 
-- The GraphQL dashboard (impressions, referrers)
-- Creating or editing magazines and membership plans, sales and payouts
+- GraphQL ダッシュボード（インプレッション、流入元）
+- マガジンやメンバーシッププランの作成・編集、売上と振込
 
-## Development
+## 開発
 
 ```bash
 bun install
-bun run dev search "Claude Code"   # run from source
-bun run build                      # bundle src/ into dist/note-cli.js (commit the result)
-bun run check                      # typecheck, tests, build, and a check that dist/ is up to date
+bun run dev search "Claude Code"   # ソースから実行
+bun run build                      # src/ を dist/note-cli.js にバンドル（生成物もコミットする）
+bun run check                      # 型チェック、テスト、ビルド、dist/ が最新かどうかの確認
 ```
 
-Repository layout:
+リポジトリ構成:
 
-- `src/`: TypeScript sources
-- `dist/note-cli.js`: bundled CLI that ships with the plugin
-- `skills/`: plugin skills
-- `.claude-plugin/`: Claude Code plugin and marketplace manifests
-- `.codex-plugin/` and `.agents/plugins/`: Codex plugin and marketplace manifests
-- `.cursor-plugin/`, `.devin-plugin/`, `.kimi-plugin/`, `.antigravity-plugin/`: plugin manifests for those agents
-- `gemini-extension.json` and `GEMINI.md`: Gemini CLI extension
-- `package.json` `pi` field: Pi package
+- `src/`: TypeScript のソース
+- `dist/note-cli.js`: プラグインに同梱するバンドル済み CLI
+- `skills/`: プラグインのスキル
+- `.claude-plugin/`: Claude Code のプラグインとマーケットプレイスのマニフェスト
+- `.codex-plugin/` と `.agents/plugins/`: Codex のプラグインとマーケットプレイスのマニフェスト
+- `.cursor-plugin/`、`.devin-plugin/`、`.kimi-plugin/`、`.antigravity-plugin/`: 各エージェント用のプラグインマニフェスト
+- `gemini-extension.json` と `GEMINI.md`: Gemini CLI 拡張
+- `package.json` の `pi` フィールド: Pi パッケージ
 
-Copilot CLI, Factory Droid and Qwen Code read `.claude-plugin/`. When bumping the version, update every manifest; `test/manifests.test.ts` checks they match `package.json`.
+Copilot CLI、Factory Droid、Qwen Code は `.claude-plugin/` を読み込みます。バージョンを上げるときはすべてのマニフェストを更新してください。`test/manifests.test.ts` が `package.json` と一致しているかを確認します。
+
+ドキュメントは README のみ日本語で書き、スキル（`skills/`）やコード、マニフェストは英語で書きます。
