@@ -1,0 +1,14 @@
+{
+  "name": "note-cli",
+  "description": "note.com CLI and skills for Claude Code / Codex",
+  "owner": {
+    "name": "uchidash"
+  },
+  "plugins": [
+    {
+      "name": "note-cli",
+      "source": "./",
+      "description": "Draft, search and analyze note.com articles with the unofficial-API note-cli"
+    }
+  ]
+}

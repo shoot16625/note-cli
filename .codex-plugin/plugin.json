@@ -1,0 +1,16 @@
+{
+  "name": "note-cli",
+  "version": "0.1.0",
+  "description": "Draft, search and analyze note.com articles with the unofficial-API note-cli",
+  "author": { "name": "uchidash" },
+  "license": "MIT",
+  "keywords": ["note", "note.com", "writing", "analytics"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "note-cli",
+    "shortDescription": "Draft, search and analyze note.com articles",
+    "developerName": "uchidash",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"]
+  }
+}
