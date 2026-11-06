@@ -18,13 +18,13 @@ Output is JSON on stdout. Errors are JSON on stderr (`{"error": {"code", "messag
 
 ## Login (only for commands that need it)
 
-`note-cli auth status` tells you whether a session exists. To log in, run `note-cli auth login` yourself with a command timeout of at least 300 seconds. It opens a Chrome/Edge/Chromium window on the note.com login page and waits for the user to finish logging in there. Tell the user to log in in that window. Never ask for their password. If no browser is found, pass `--browser <path>`, or have the user copy the `Cookie` request header from DevTools and pipe it to `note-cli auth import`.
+`note-cli auth status` tells you whether a session exists. To log in, run `note-cli auth login` yourself with a command timeout of at least 300 seconds. It opens a Chrome/Edge/Chromium window on the note.com login page and waits for the user to finish logging in there. Tell the user to log in in that window. Never ask for their password. If no browser is found, pass `--browser <path>`, or have the user copy the `Cookie` request header (or just the `_note_session_v5` value) from DevTools and pipe it to `note-cli auth import`.
 
 ## Commands
 
 ```bash
 note-cli auth status                                  # who is logged in
-note-cli stats pv --filter all|daily|weekly|monthly --sort pv|like|comment --page 1
+note-cli stats pv --filter all|daily|weekly|monthly|yearly --sort pv|like|comment --page 1
 note-cli analyze user <own urlname> --limit 100       # likes/title/timing breakdown of own posts
 note-cli draft list                                   # own articles incl. drafts
 ```

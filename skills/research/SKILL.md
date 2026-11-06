@@ -18,7 +18,7 @@ Output is JSON on stdout. Errors are JSON on stderr (`{"error": {"code", "messag
 
 ## Login (only for commands that need it)
 
-`note-cli auth status` tells you whether a session exists. To log in, run `note-cli auth login` yourself with a command timeout of at least 300 seconds. It opens a Chrome/Edge/Chromium window on the note.com login page and waits for the user to finish logging in there. Tell the user to log in in that window. Never ask for their password. If no browser is found, pass `--browser <path>`, or have the user copy the `Cookie` request header from DevTools and pipe it to `note-cli auth import`.
+`note-cli auth status` tells you whether a session exists. To log in, run `note-cli auth login` yourself with a command timeout of at least 300 seconds. It opens a Chrome/Edge/Chromium window on the note.com login page and waits for the user to finish logging in there. Tell the user to log in in that window. Never ask for their password. If no browser is found, pass `--browser <path>`, or have the user copy the `Cookie` request header (or just the `_note_session_v5` value) from DevTools and pipe it to `note-cli auth import`.
 
 ## Commands
 
@@ -26,15 +26,19 @@ Output is JSON on stdout. Errors are JSON on stderr (`{"error": {"code", "messag
 note-cli search "<query>" --sort popular|hot|new --limit 20     # articles by keyword
 note-cli hashtag <tag> --order popular|hot|new --limit 50 [--paid-only]
 note-cli user <urlname> --limit 20                              # profile + recent articles
-note-cli note <key|url>                                         # article text (paid parts are hidden)
+note-cli note <key|url> [--max-chars N]                         # article text, cut at 20000 chars by default (paid parts are hidden)
 
 note-cli analyze search "<query>" --limit 100 --top 10
 note-cli analyze hashtag <tag> --limit 100
 note-cli analyze user <urlname> --limit 100
 ```
 
-Each article is returned as `{key, title, url, author, likeCount, commentCount, price, isPaid, publishAt, hashtags, imageCount}`.
-Hashtags are only filled by `user` (creator) listings; search and hashtag listings return them empty.
+Each article is returned as `{key, title, url, author, likeCount, commentCount, price, isPaid, publishAt, hashtags, excerpt, imageCount}`.
+
+- `hashtags` are filled by `user` listings and `note`; search and hashtag listings don't include them.
+- `excerpt` (≤ 200 chars) comes from `hashtag`, `user` and `note`; search results have none. Use `note <key>` to read one in full.
+- `note` reports `bodyChars` and `truncated`; raise `--max-chars` (0 = no limit) only when you really need the whole text.
+- List outputs include `exhausted` (no more results exist) and, when the API returned rows note-cli could not read, `skipped` with reasons. Mention `skipped` to the user: it usually means note changed its API.
 
 `analyze` returns:
 - `likes` — count/mean/median/p90/max of like counts

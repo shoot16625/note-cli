@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
-import { htmlToText, markdownToNoteHtml, parseArticle, visibleTextLength } from "../src/markdown.ts";
+import { htmlToText, markdownToNoteHtml, parseArticle, safeHref, visibleTextLength } from "../src/markdown.ts";
 
 test("parseArticle prefers frontmatter title and strips frontmatter", () => {
   const a = parseArticle("---\ntitle: \"FM Title\"\ntags: x\n---\n# H1 Title\n\nbody");
@@ -44,9 +44,10 @@ test("single newlines become <br> and code block newlines are preserved", () => 
 });
 
 test("images and tables degrade with warnings; raw HTML is escaped", () => {
-  const r = markdownToNoteHtml("![alt](pic.png)\n\n|a|b|\n|-|-|\n|1|2|\n\n<script>alert(1)</script>");
-  assert.equal(r.warnings.length, 3);
-  assert.match(r.html, /<a href="pic.png">alt<\/a>/);
+  const r = markdownToNoteHtml("![alt](https://x.com/pic.png)\n\n![local](pic.png)\n\n|a|b|\n|-|-|\n|1|2|\n\n<script>alert(1)</script>");
+  assert.equal(r.warnings.length, 4);
+  assert.match(r.html, /<a href="https:\/\/x.com\/pic.png">alt<\/a>/);
+  assert.match(r.html, />local</);
   assert.match(r.html, /<code>a \| b\n1 \| 2<\/code>/);
   assert.doesNotMatch(r.html, /<script>/);
 });
@@ -63,4 +64,19 @@ test("bodyLength counts visible characters only", () => {
 test("htmlToText renders a readable outline", () => {
   const text = htmlToText("<h2>T</h2><p>a<br>b &amp; c</p><ul><li>x</li></ul>");
   assert.equal(text, "## T\na\nb & c\n- x");
+});
+
+test("safeHref allows only absolute http(s) and mailto URLs", () => {
+  assert.equal(safeHref("https://note.com/x"), "https://note.com/x");
+  assert.equal(safeHref("mailto:a@b.c"), "mailto:a@b.c");
+  for (const bad of ["javascript:alert(1)", "JaVaScRiPt:alert(1)", " javascript:alert(1)", "data:text/html,x", "vbscript:x", "/relative", "pic.png"]) {
+    assert.equal(safeHref(bad), null, bad);
+  }
+});
+
+test("unsafe links keep their text but lose the href", () => {
+  const r = markdownToNoteHtml("[click](JavaScript:alert(1)) and [data](data:text/html,hi) and [ok](https://x.com)");
+  assert.doesNotMatch(r.html, /javascript|data:/i);
+  assert.match(r.html, /click and data and <a href="https:\/\/x.com">ok<\/a>/);
+  assert.equal(r.warnings.length, 2);
 });

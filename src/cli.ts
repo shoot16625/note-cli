@@ -5,8 +5,11 @@ import * as api from "./api.ts";
 import { CliError, NoteClient } from "./client.ts";
 import { browserLogin } from "./login.ts";
 import { htmlToText, markdownToNoteHtml, parseArticle } from "./markdown.ts";
-import { normalizeNote } from "./normalize.ts";
+import { tryNormalizeNote, type Skipped } from "./normalize.ts";
 import { clearSession, loadSession, parseCookieHeader, saveSession, sessionPath } from "./session.ts";
+import * as v from "./validate.ts";
+
+export { noteKey } from "./validate.ts";
 
 type Options = NonNullable<ParseArgsConfig["options"]>;
 type Values = Record<string, string | boolean | undefined>;
@@ -21,6 +24,7 @@ interface Command {
 }
 
 const SORTS = ["popular", "hot", "new"];
+const DEFAULT_MAX_CHARS = "20000";
 
 const COMMANDS: Record<string, Command> = {
   // ---------------- auth ----------------
@@ -45,16 +49,12 @@ const COMMANDS: Record<string, Command> = {
     },
   },
   "auth import": {
-    usage: "auth import [--cookie '<Cookie header>']   (or pipe the header via stdin)",
-    summary: "Save a session from a Cookie header copied from browser DevTools",
+    usage: "auth import [--cookie '<Cookie header or _note_session_v5 value>']   (or pipe it via stdin)",
+    summary: "Save a session from a Cookie header (or just the _note_session_v5 value) copied from browser DevTools",
     options: { cookie: { type: "string" } },
     async run({ values }) {
       const raw = typeof values.cookie === "string" ? values.cookie : await readStdin();
-      const cookies = parseCookieHeader(raw.trim());
-      if (!cookies._note_session_v5) {
-        throw new CliError("INVALID_INPUT", "The cookie string must contain _note_session_v5.");
-      }
-      return finishLogin(cookies);
+      return finishLogin(parseImportedCookies(raw));
     },
   },
   "auth status": {
@@ -102,9 +102,10 @@ const COMMANDS: Record<string, Command> = {
     options: { title: { type: "string" }, "dry-run": { type: "boolean" } },
     args: 2,
     async run({ values, positionals, client }) {
+      const ref = v.noteIdOrKey(positionals[0]);
       const article = await loadArticle(positionals[1], values.title);
       if (values["dry-run"]) return { dryRun: true, ...article };
-      const { id, key } = await api.resolveNoteId(client, positionals[0]);
+      const { id, key } = await api.resolveNoteId(client, ref);
       await api.saveDraft(client, id, article);
       return {
         updated: true,
@@ -118,21 +119,24 @@ const COMMANDS: Record<string, Command> = {
     },
   },
   "draft get": {
-    usage: "draft get <key|url> [--html]",
+    usage: "draft get <key|url> [--html] [--max-chars <n>]",
     summary: "Read a draft (or your own article) as the editor sees it",
-    options: { html: { type: "boolean" } },
+    options: { html: { type: "boolean" }, "max-chars": { type: "string", default: DEFAULT_MAX_CHARS } },
     args: 1,
     async run({ values, positionals, client }) {
-      const data = await api.getDraft(client, noteKey(positionals[0]));
-      const draft = data?.note_draft ?? data;
-      const html: string = draft?.body ?? data?.body ?? "";
+      const key = v.noteKey(positionals[0]);
+      const maxChars = int(values["max-chars"], "max-chars");
+      const data = await api.getDraft(client, key);
+      if (!data || typeof data !== "object") throw new CliError("NOT_FOUND", `No draft data for ${key}.`);
+      const draft = data.note_draft ?? data;
+      const html: string = typeof draft.body === "string" ? draft.body : typeof data.body === "string" ? data.body : "";
       return {
-        id: data?.id,
-        key: data?.key,
-        status: data?.status,
-        title: draft?.name ?? data?.name,
-        editUrl: data?.key ? api.editUrl(data.key) : null,
-        ...(values.html ? { bodyHtml: html } : { bodyText: htmlToText(html) }),
+        id: data.id,
+        key: data.key,
+        status: data.status,
+        title: draft.name ?? data.name,
+        editUrl: data.key ? api.editUrl(data.key) : null,
+        ...bodyField(html, Boolean(values.html), maxChars),
       };
     },
   },
@@ -143,7 +147,7 @@ const COMMANDS: Record<string, Command> = {
     async run({ values, client }) {
       const res = await api.myNotes(client, int(values.page, "page"));
       const items = values.status ? res.items.filter((n) => n.status === values.status) : res.items;
-      return { page: int(values.page, "page"), isLastPage: res.isLastPage, count: items.length, notes: items };
+      return { page: int(values.page, "page"), isLastPage: res.isLastPage, count: items.length, notes: items, ...skippedField(res.skipped) };
     },
   },
   "draft delete": {
@@ -152,8 +156,9 @@ const COMMANDS: Record<string, Command> = {
     options: { yes: { type: "boolean" } },
     args: 1,
     async run({ values, positionals, client }) {
+      const ref = v.noteIdOrKey(positionals[0]);
       if (!values.yes) throw new CliError("CONFIRMATION_REQUIRED", "Pass --yes to delete the draft.");
-      const { id, key } = await api.resolveNoteId(client, positionals[0]);
+      const { id, key } = await api.resolveNoteId(client, ref);
       await api.deleteDraft(client, id);
       return { deleted: true, id, key };
     },
@@ -176,7 +181,7 @@ const COMMANDS: Record<string, Command> = {
         limit: int(values.limit, "limit"),
         start: int(values.start, "start"),
       });
-      return { query: q, total: res.total, count: res.items.length, notes: res.items };
+      return { query: q, total: res.total, count: res.items.length, exhausted: res.exhausted, notes: res.items, ...skippedField(res.skipped) };
     },
   },
   hashtag: {
@@ -189,12 +194,13 @@ const COMMANDS: Record<string, Command> = {
     },
     args: 1,
     async run({ values, positionals, client }) {
-      const res = await api.hashtagNotes(client, positionals[0], {
+      const tag = v.hashtag(positionals[0]);
+      const res = await api.hashtagNotes(client, tag, {
         order: oneOf(values.order, SORTS, "order") as api.HashtagOrder,
         limit: int(values.limit, "limit"),
         paidOnly: Boolean(values["paid-only"]),
       });
-      return { hashtag: positionals[0].replace(/^#/, ""), total: res.total, count: res.items.length, notes: res.items };
+      return { hashtag: tag, total: res.total, count: res.items.length, exhausted: res.exhausted, notes: res.items, ...skippedField(res.skipped) };
     },
   },
   user: {
@@ -203,7 +209,7 @@ const COMMANDS: Record<string, Command> = {
     options: { limit: { type: "string", default: "20" } },
     args: 1,
     async run({ values, positionals, client }) {
-      const urlname = positionals[0];
+      const urlname = v.urlname(positionals[0]);
       const creator = await api.getCreator(client, urlname);
       const res = await api.creatorNotes(client, urlname, { limit: int(values.limit, "limit") });
       return {
@@ -217,23 +223,31 @@ const COMMANDS: Record<string, Command> = {
         },
         total: res.total,
         count: res.items.length,
+        exhausted: res.exhausted,
         notes: res.items,
+        ...skippedField(res.skipped),
       };
     },
   },
   note: {
-    usage: "note <key|url> [--html]",
-    summary: "Read a published article (summary + body text)",
-    options: { html: { type: "boolean" } },
+    usage: "note <key|url> [--html] [--max-chars <n>]",
+    summary: "Read a published article (summary + body text; paid parts are hidden)",
+    options: { html: { type: "boolean" }, "max-chars": { type: "string", default: DEFAULT_MAX_CHARS } },
     args: 1,
     async run({ values, positionals, client }) {
-      const data = await api.getNote(client, noteKey(positionals[0]));
-      const body: string = data?.body ?? "";
+      const key = v.noteKey(positionals[0]);
+      const maxChars = int(values["max-chars"], "max-chars");
+      const data = await api.getNote(client, key);
+      const summary = tryNormalizeNote(data);
+      if (typeof summary === "string") {
+        throw new CliError("API_ERROR", `Unexpected response for ${key}: ${summary}.`);
+      }
+      const body: string = typeof data.body === "string" ? data.body : "";
       return {
-        ...normalizeNote(data ?? {}),
-        description: data?.description ?? null,
-        canRead: data?.can_read ?? data?.canRead ?? null,
-        ...(values.html ? { bodyHtml: body } : { bodyText: htmlToText(body) }),
+        ...summary,
+        description: data.description ?? null,
+        canRead: data.can_read ?? data.canRead ?? null,
+        ...bodyField(body, Boolean(values.html), maxChars),
       };
     },
   },
@@ -254,7 +268,7 @@ const COMMANDS: Record<string, Command> = {
         sort: oneOf(values.sort, SORTS, "sort") as api.SearchSort,
         limit: int(values.limit, "limit"),
       });
-      return { source: { type: "search", query: q, sort: values.sort, total: res.total }, ...analyzeNotes(res.items, { top: int(values.top, "top") }) };
+      return { source: { type: "search", query: q, sort: values.sort, total: res.total }, ...skippedField(res.skipped), ...analyzeNotes(res.items, { top: int(values.top, "top") }) };
     },
   },
   "analyze hashtag": {
@@ -267,11 +281,12 @@ const COMMANDS: Record<string, Command> = {
     },
     args: 1,
     async run({ values, positionals, client }) {
-      const res = await api.hashtagNotes(client, positionals[0], {
+      const tag = v.hashtag(positionals[0]);
+      const res = await api.hashtagNotes(client, tag, {
         order: oneOf(values.order, SORTS, "order") as api.HashtagOrder,
         limit: int(values.limit, "limit"),
       });
-      return { source: { type: "hashtag", hashtag: positionals[0], order: values.order, total: res.total }, ...analyzeNotes(res.items, { top: int(values.top, "top") }) };
+      return { source: { type: "hashtag", hashtag: tag, order: values.order, total: res.total }, ...skippedField(res.skipped), ...analyzeNotes(res.items, { top: int(values.top, "top") }) };
     },
   },
   "analyze user": {
@@ -280,12 +295,13 @@ const COMMANDS: Record<string, Command> = {
     options: { limit: { type: "string", default: "100" }, top: { type: "string", default: "10" } },
     args: 1,
     async run({ values, positionals, client }) {
-      const res = await api.creatorNotes(client, positionals[0], { limit: int(values.limit, "limit") });
-      return { source: { type: "user", urlname: positionals[0], total: res.total }, ...analyzeNotes(res.items, { top: int(values.top, "top") }) };
+      const urlname = v.urlname(positionals[0]);
+      const res = await api.creatorNotes(client, urlname, { limit: int(values.limit, "limit") });
+      return { source: { type: "user", urlname, total: res.total }, ...skippedField(res.skipped), ...analyzeNotes(res.items, { top: int(values.top, "top") }) };
     },
   },
   "stats pv": {
-    usage: "stats pv [--filter all|daily|weekly|monthly] [--sort pv|like|comment] [--page <n>]",
+    usage: "stats pv [--filter all|daily|weekly|monthly|yearly] [--sort pv|like|comment] [--page <n>]",
     summary: "Your own page views / likes / comments per article (requires login)",
     options: {
       filter: { type: "string", default: "all" },
@@ -294,7 +310,7 @@ const COMMANDS: Record<string, Command> = {
     },
     async run({ values, client }) {
       return api.statsPv(client, {
-        filter: oneOf(values.filter, ["all", "daily", "weekly", "monthly"], "filter") as api.PvFilter,
+        filter: oneOf(values.filter, ["all", "daily", "weekly", "monthly", "yearly"], "filter") as api.PvFilter,
         sort: oneOf(values.sort, ["pv", "like", "comment"], "sort") as api.PvSort,
         page: int(values.page, "page"),
       });
@@ -322,9 +338,28 @@ async function loadArticle(file: string, titleOverride: string | boolean | undef
   return { title, html, bodyLength, warnings };
 }
 
-export function noteKey(input: string): string {
-  const m = input.match(/(?:^|\/)(n[0-9a-f]{12,})(?:[/?#]|$)/);
-  return m ? m[1] : input;
+/** Accept a full Cookie header, `_note_session_v5=...`, or just the bare session value. */
+export function parseImportedCookies(raw: string): Record<string, string> {
+  const s = raw.trim();
+  const cookies = s.includes("=") ? parseCookieHeader(s) : s ? { _note_session_v5: s } : {};
+  if (!cookies._note_session_v5) {
+    throw new CliError("INVALID_INPUT", "Expected a Cookie header containing _note_session_v5, or the _note_session_v5 value itself.");
+  }
+  return cookies;
+}
+
+/** Body as text (default) or HTML, cut to `maxChars` characters (0 = no limit) so long articles don't flood an agent's context. */
+function bodyField(html: string, asHtml: boolean, maxChars: number) {
+  const full = asHtml ? html : htmlToText(html);
+  const chars = [...full];
+  const truncated = maxChars > 0 && chars.length > maxChars;
+  const body = truncated ? chars.slice(0, maxChars).join("") : full;
+  return { ...(asHtml ? { bodyHtml: body } : { bodyText: body }), bodyChars: chars.length, truncated };
+}
+
+/** Only mention skipped rows when there were some. */
+function skippedField(skipped: Skipped[]) {
+  return skipped.length ? { skipped: { count: skipped.length, rows: skipped.slice(0, 10) } } : {};
 }
 
 function int(v: unknown, name: string): number {

@@ -286,312 +286,6 @@ function safeDecode(v) {
   }
 }
 
-// src/normalize.ts
-function pick(obj, ...keys) {
-  for (const k of keys) {
-    if (obj && obj[k] !== undefined && obj[k] !== null)
-      return obj[k];
-  }
-  return;
-}
-function normalizeNote(raw) {
-  const user = raw.user ?? {};
-  const urlname = pick(user, "urlname") ?? null;
-  const key = String(pick(raw, "key") ?? "");
-  const price = Number(pick(raw, "price") ?? 0);
-  const hashtags = (pick(raw, "hashtags") ?? []).map((h) => h?.hashtag?.name ?? h?.name ?? (typeof h === "string" ? h : null)).filter((h) => Boolean(h)).map((h) => h.replace(/^#/, ""));
-  return {
-    id: pick(raw, "id") ?? null,
-    key,
-    title: String(pick(raw, "name") ?? ""),
-    url: pick(raw, "noteUrl", "note_url") ?? (urlname ? `https://note.com/${urlname}/n/${key}` : `https://note.com/n/${key}`),
-    status: pick(raw, "status") ?? null,
-    author: { urlname, nickname: pick(user, "nickname", "name") ?? null },
-    likeCount: Number(pick(raw, "like_count", "likeCount") ?? 0),
-    commentCount: pick(raw, "comment_count", "commentCount") ?? null,
-    price,
-    isPaid: price > 0,
-    publishAt: pick(raw, "publish_at", "publishAt") ?? null,
-    hashtags,
-    eyecatch: pick(raw, "eyecatch", "eyecatch_url", "eyecatchUrl") || null,
-    imageCount: pick(raw, "image_count", "imageCount") ?? null
-  };
-}
-
-// src/api.ts
-async function searchNotes(client, q, opts = {}) {
-  const limit = opts.limit ?? 20;
-  const pageSize = 20;
-  let start = opts.start ?? 0;
-  const items = [];
-  let total = null;
-  let exhausted = false;
-  while (items.length < limit) {
-    const res = await client.request("/v3/searches", {
-      auth: "optional",
-      query: { context: "note", q, size: Math.min(pageSize, limit - items.length), start, sort: opts.sort ?? "popular" }
-    });
-    const notes = res?.data?.notes ?? {};
-    const contents = notes.contents ?? [];
-    total = notes.total_count ?? total;
-    items.push(...contents.map(normalizeNote));
-    start += contents.length;
-    if (notes.is_last_page || contents.length === 0) {
-      exhausted = true;
-      break;
-    }
-  }
-  return { items: items.slice(0, limit), total, exhausted };
-}
-async function hashtagNotes(client, tag, opts = {}) {
-  const limit = opts.limit ?? 50;
-  const name = tag.replace(/^#/, "");
-  const items = [];
-  let total = null;
-  let exhausted = false;
-  for (let page = 1;items.length < limit; page++) {
-    const res = await client.request(`/v3/hashtags/${encodeURIComponent(name)}/notes`, {
-      auth: "optional",
-      query: { order: opts.order ?? "popular", page, paid_only: opts.paidOnly ? "true" : undefined }
-    });
-    const data = res?.data ?? {};
-    const notes = data.notes ?? [];
-    total = data.count ?? total;
-    items.push(...notes.map(normalizeNote));
-    if (data.is_last_page || notes.length === 0) {
-      exhausted = true;
-      break;
-    }
-  }
-  return { items: items.slice(0, limit), total, exhausted };
-}
-async function creatorNotes(client, urlname, opts = {}) {
-  const limit = opts.limit ?? 50;
-  const items = [];
-  let total = null;
-  let exhausted = false;
-  for (let page = 1;items.length < limit; page++) {
-    const res = await client.request(`/v2/creators/${encodeURIComponent(urlname)}/contents`, {
-      auth: "optional",
-      query: { kind: "note", page }
-    });
-    const data = res?.data ?? {};
-    const contents = data.contents ?? [];
-    total = data.totalCount ?? total;
-    items.push(...contents.map(normalizeNote));
-    if (data.isLastPage || contents.length === 0) {
-      exhausted = true;
-      break;
-    }
-  }
-  return { items: items.slice(0, limit), total, exhausted };
-}
-async function getCreator(client, urlname) {
-  const res = await client.request(`/v2/creators/${encodeURIComponent(urlname)}`, { auth: "optional" });
-  return res?.data;
-}
-async function getNote(client, key) {
-  const res = await client.request(`/v3/notes/${encodeURIComponent(key)}`, { auth: "optional" });
-  return res?.data;
-}
-async function currentUser(client) {
-  const res = await client.request("/v2/current_user", { auth: "required" });
-  if (!res?.data)
-    throw new CliError("AUTH_ERROR", "current_user returned no data; session is likely invalid.");
-  return res.data;
-}
-async function getDraft(client, key) {
-  const res = await client.request(`/v3/notes/${encodeURIComponent(key)}`, {
-    auth: "required",
-    query: { draft: "true", draft_reedit: "false" }
-  });
-  return res?.data;
-}
-async function resolveNoteId(client, idOrKey) {
-  if (/^\d+$/.test(idOrKey))
-    return { id: Number(idOrKey), key: null };
-  const key = idOrKey.match(/n[0-9a-f]{12,}/)?.[0] ?? idOrKey;
-  const data = await getDraft(client, key);
-  if (!data?.id)
-    throw new CliError("NOT_FOUND", `Could not resolve note id for "${idOrKey}".`);
-  return { id: Number(data.id), key: data.key ?? key };
-}
-async function myNotes(client, page = 1) {
-  const res = await client.request("/v2/note_list/contents", { auth: "required", query: { page } });
-  const data = res?.data ?? {};
-  const list = data.notes ?? data.contents ?? (Array.isArray(data) ? data : []);
-  return { items: list.map(normalizeNote), isLastPage: data.isLastPage ?? data.is_last_page ?? null };
-}
-function editUrl(key) {
-  return `${EDITOR_ORIGIN}/notes/${key}/edit/`;
-}
-async function createDraft(client, title) {
-  const res = await client.request("/v1/text_notes", {
-    method: "POST",
-    auth: "required",
-    editor: true,
-    json: { body: "<p></p>", body_length: 0, name: title, index: false, is_lead_form: false }
-  });
-  const d = res?.data ?? res;
-  const note = d?.note ?? d?.text_note ?? d;
-  const id = note?.id ?? d?.note_id;
-  const key = note?.key ?? d?.note_key;
-  if (!id || !key) {
-    throw new CliError("API_ERROR", "Draft was created but id/key were missing from the response.", { detail: res });
-  }
-  return { id: Number(id), key, editUrl: editUrl(key) };
-}
-async function saveDraft(client, id, body) {
-  const res = await client.request("/v1/text_notes/draft_save", {
-    method: "POST",
-    auth: "required",
-    editor: true,
-    query: { id },
-    json: { name: body.title, body: body.html, body_length: body.bodyLength, index: false, is_lead_form: false }
-  });
-  return res?.data ?? res;
-}
-async function deleteDraft(client, id) {
-  const res = await client.request("/v1/text_notes/draft_delete", {
-    method: "DELETE",
-    auth: "required",
-    editor: true,
-    query: { id }
-  });
-  return res?.data ?? res;
-}
-async function statsPv(client, opts = {}) {
-  const res = await client.request("/v1/stats/pv", {
-    auth: "required",
-    query: { filter: opts.filter ?? "all", page: opts.page ?? 1, sort: opts.sort ?? "pv" }
-  });
-  return res?.data ?? res;
-}
-
-// src/login.ts
-import { spawn } from "child_process";
-import { existsSync } from "fs";
-import { mkdtemp, readFile as readFile2, rm as rm2 } from "fs/promises";
-import { tmpdir } from "os";
-import { join as join2 } from "path";
-function browserCandidates() {
-  switch (process.platform) {
-    case "darwin":
-      return [
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium"
-      ];
-    case "win32": {
-      const roots = [process.env["PROGRAMFILES"], process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA].filter(Boolean);
-      return roots.flatMap((r) => [
-        join2(r, "Google/Chrome/Application/chrome.exe"),
-        join2(r, "Microsoft/Edge/Application/msedge.exe")
-      ]);
-    }
-    default:
-      return ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/microsoft-edge"];
-  }
-}
-function findBrowser(explicit) {
-  const path = explicit || process.env.NOTE_CLI_BROWSER || browserCandidates().find((p) => existsSync(p));
-  if (!path || !existsSync(path)) {
-    throw new CliError("BROWSER_NOT_FOUND", "No Chrome/Edge/Chromium found. Pass --browser <path> (or set NOTE_CLI_BROWSER), or use `note-cli auth import`.");
-  }
-  return path;
-}
-
-class Cdp {
-  nextId = 1;
-  pending = new Map;
-  ws;
-  constructor(ws) {
-    this.ws = ws;
-    ws.addEventListener("message", (ev) => {
-      const msg = JSON.parse(String(ev.data));
-      const p = msg.id ? this.pending.get(msg.id) : undefined;
-      if (!p)
-        return;
-      this.pending.delete(msg.id);
-      if (msg.error)
-        p.reject(new Error(msg.error.message));
-      else
-        p.resolve(msg.result);
-    });
-  }
-  static connect(url) {
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url);
-      ws.addEventListener("open", () => resolve(new Cdp(ws)), { once: true });
-      ws.addEventListener("error", () => reject(new Error(`Cannot connect to ${url}`)), { once: true });
-    });
-  }
-  send(method, params = {}) {
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.ws.send(JSON.stringify({ id, method, params }));
-    });
-  }
-  close() {
-    this.ws.close();
-  }
-}
-var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitForDevToolsPort(profileDir, proc, timeoutMs = 20000) {
-  const file = join2(profileDir, "DevToolsActivePort");
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (proc.exitCode !== null)
-      throw new CliError("BROWSER_LAUNCH_FAILED", "Browser exited before it was ready.");
-    try {
-      const [port, path] = (await readFile2(file, "utf8")).trim().split(`
-`);
-      if (port && path)
-        return `ws://127.0.0.1:${port}${path}`;
-    } catch {}
-    await sleep(200);
-  }
-  throw new CliError("BROWSER_LAUNCH_FAILED", "Timed out waiting for the browser's DevTools port.");
-}
-async function browserLogin(opts) {
-  const executable = findBrowser(opts.browser);
-  const profileDir = await mkdtemp(join2(tmpdir(), "note-cli-login-"));
-  const proc = spawn(executable, [
-    `--user-data-dir=${profileDir}`,
-    "--remote-debugging-port=0",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "https://note.com/login"
-  ], { stdio: "ignore" });
-  let cdp;
-  try {
-    cdp = await Cdp.connect(await waitForDevToolsPort(profileDir, proc));
-    console.error("Log in to note.com in the opened browser window. Waiting...");
-    const deadline = Date.now() + opts.timeoutSec * 1000;
-    while (Date.now() < deadline) {
-      if (proc.exitCode !== null)
-        throw new CliError("LOGIN_ABORTED", "The browser was closed before login completed.");
-      const { targetInfos } = await cdp.send("Target.getTargets");
-      const onLoginPage = targetInfos.some((t) => t.type === "page" && /note\.com\/login/.test(t.url));
-      if (!onLoginPage) {
-        const { cookies } = await cdp.send("Storage.getCookies");
-        const map = Object.fromEntries(cookies.filter((c) => /(^|\.)note\.com$/.test(c.domain.replace(/^\./, ""))).map((c) => [c.name, c.value]));
-        if (map._note_session_v5 && await opts.isLoggedIn(map))
-          return map;
-      }
-      await sleep(1500);
-    }
-    throw new CliError("LOGIN_TIMEOUT", `Login was not completed within ${opts.timeoutSec}s.`);
-  } finally {
-    cdp?.close();
-    proc.kill();
-    await sleep(300);
-    await rm2(profileDir, { recursive: true, force: true }).catch(() => {});
-  }
-}
-
 // src/markdown.ts
 import { randomUUID } from "crypto";
 
@@ -2162,10 +1856,20 @@ function markdownToNoteHtml(markdown) {
         return `<p><strong>${inner}</strong></p>
 `;
       },
+      link(token) {
+        const inner = this.parser.parseInline(token.tokens);
+        const href = safeHref(token.href);
+        if (!href) {
+          warnings.push(`Link "${token.href}" was dropped (only http, https and mailto links are allowed).`);
+          return inner;
+        }
+        return `<a href="${escapeAttr(href)}">${inner}</a>`;
+      },
       image(token) {
-        warnings.push(`Image "${token.href}" was not uploaded (image upload is not supported yet); replaced with a link. Add it in the note editor.`);
         const label = escapeHtml(token.text || token.href);
-        return `<a href="${escapeAttr(token.href)}">${label}</a>`;
+        const href = safeHref(token.href);
+        warnings.push(`Image "${token.href}" was not uploaded (image upload is not supported yet); ${href ? "replaced with a link" : "replaced with its alt text"}. Add it in the note editor.`);
+        return href ? `<a href="${escapeAttr(href)}">${label}</a>` : label;
       },
       table(token) {
         warnings.push("Tables are not supported by note.com; rendered as a code block.");
@@ -2196,8 +1900,17 @@ function addBlockIds(html) {
     return `<${tag}${attrs} name="${id}" id="${id}"${selfClose}>`;
   });
 }
+function safeHref(href) {
+  const trimmed = href.trim();
+  try {
+    const url = new URL(trimmed);
+    return ["http:", "https:", "mailto:"].includes(url.protocol) ? trimmed : null;
+  } catch {
+    return null;
+  }
+}
 function stripDangerous(html) {
-  return html.replace(/<(script|iframe|object|embed|form|style)[^>]*>[\s\S]*?<\/\1>/gi, "").replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*')/gi, "").replace(/href="javascript:[^"]*"/gi, 'href="#"');
+  return html.replace(/<(script|iframe|object|embed|form|style)[^>]*>[\s\S]*?<\/\1>/gi, "").replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*')/gi, "");
 }
 function visibleTextLength(html) {
   const text = html.replace(/<br\s*\/?>/gi, "").replace(/<[^>]+>/g, "").replace(/&(lt|gt|amp|quot|#0?39|nbsp);/g, "x");
@@ -2217,8 +1930,379 @@ function escapeAttr(s) {
   return escapeHtml(s).replace(/"/g, "&quot;");
 }
 
+// src/normalize.ts
+var EXCERPT_MAX_CHARS = 200;
+function pick(obj, ...keys) {
+  for (const k of keys) {
+    if (obj && obj[k] !== undefined && obj[k] !== null)
+      return obj[k];
+  }
+  return;
+}
+function toNumber(v) {
+  const n = Number(v);
+  return v === undefined || v === null || Number.isNaN(n) ? null : n;
+}
+function hashtagsOf(raw) {
+  const list = pick(raw, "hashtag_notes", "hashtagNotes", "hashtags");
+  if (!Array.isArray(list))
+    return [];
+  return list.map((h) => h?.hashtag?.name ?? h?.name ?? (typeof h === "string" ? h : null)).filter((h) => typeof h === "string" && h.length > 0).map((h) => h.replace(/^#/, ""));
+}
+function makeExcerpt(raw, max = EXCERPT_MAX_CHARS) {
+  const source = pick(raw, "description") || pick(raw, "body");
+  if (typeof source !== "string" || !source.trim())
+    return null;
+  const text = htmlToText(source).replace(/\s+/g, " ").trim();
+  if (!text)
+    return null;
+  const chars = [...text];
+  return chars.length > max ? `${chars.slice(0, max).join("")}\u2026` : text;
+}
+function tryNormalizeNote(raw) {
+  if (!raw || typeof raw !== "object")
+    return "row is not an object";
+  const r = raw;
+  const key = pick(r, "key");
+  if (typeof key !== "string" || !key)
+    return "missing key";
+  const title = pick(r, "name");
+  if (typeof title !== "string")
+    return `missing title (key ${key})`;
+  const user = r.user ?? {};
+  const urlname = typeof user.urlname === "string" ? user.urlname : null;
+  const price = toNumber(pick(r, "price")) ?? 0;
+  return {
+    id: toNumber(pick(r, "id")),
+    key,
+    title,
+    url: pick(r, "noteUrl", "note_url") ?? (urlname ? `https://note.com/${urlname}/n/${key}` : `https://note.com/n/${key}`),
+    status: pick(r, "status") ?? null,
+    author: { urlname, nickname: pick(user, "nickname", "name") ?? null },
+    likeCount: toNumber(pick(r, "like_count", "likeCount")) ?? 0,
+    commentCount: toNumber(pick(r, "comment_count", "commentCount")),
+    price,
+    isPaid: price > 0,
+    publishAt: pick(r, "publish_at", "publishAt") ?? null,
+    hashtags: hashtagsOf(r),
+    excerpt: makeExcerpt(r),
+    eyecatch: pick(r, "eyecatch", "eyecatch_url", "eyecatchUrl") || null,
+    imageCount: toNumber(pick(r, "image_count", "imageCount"))
+  };
+}
+function normalizeNotes(rows, offset = 0) {
+  if (!Array.isArray(rows)) {
+    return { items: [], skipped: rows === undefined || rows === null ? [] : [{ index: offset, reason: "list is not an array" }] };
+  }
+  const items = [];
+  const skipped = [];
+  rows.forEach((row, i) => {
+    const n = tryNormalizeNote(row);
+    if (typeof n === "string")
+      skipped.push({ index: offset + i, reason: n });
+    else
+      items.push(n);
+  });
+  return { items, skipped };
+}
+
+// src/api.ts
+async function paginate(limit, pageSize, fetchBatch, startOffset = 0) {
+  const items = [];
+  const skipped = [];
+  let total = null;
+  let exhausted = false;
+  let offset = startOffset;
+  for (let pageIndex = 0;items.length < limit; pageIndex++) {
+    const size = Math.min(pageSize, limit - items.length);
+    const batch = await fetchBatch(offset, size, pageIndex);
+    const rowCount = Array.isArray(batch.rows) ? batch.rows.length : 0;
+    const normalized = normalizeNotes(batch.rows, offset);
+    items.push(...normalized.items);
+    skipped.push(...normalized.skipped);
+    total = batch.total ?? total;
+    offset += rowCount;
+    if (rowCount === 0 || batch.isLastPage === true || total !== null && offset >= total || batch.isLastPage === null && rowCount < size) {
+      exhausted = true;
+      break;
+    }
+  }
+  return { items: items.slice(0, limit), total, exhausted, skipped };
+}
+var num = (v) => typeof v === "number" ? v : null;
+var bool = (v) => typeof v === "boolean" ? v : null;
+async function searchNotes(client, q2, opts = {}) {
+  return paginate(opts.limit ?? 20, 20, async (start, size) => {
+    const res = await client.request("/v3/searches", {
+      auth: "optional",
+      query: { context: "note", q: q2, size, start, sort: opts.sort ?? "popular" }
+    });
+    const notes = res?.data?.notes ?? {};
+    return { rows: notes.contents, total: num(notes.total_count), isLastPage: bool(notes.is_last_page) };
+  }, opts.start ?? 0);
+}
+async function hashtagNotes(client, tag, opts = {}) {
+  return paginate(opts.limit ?? 50, 50, async (_offset, _size, pageIndex) => {
+    const res = await client.request(`/v3/hashtags/${encodeURIComponent(tag)}/notes`, {
+      auth: "optional",
+      query: { order: opts.order ?? "popular", page: pageIndex + 1, paid_only: opts.paidOnly ? "true" : undefined }
+    });
+    const data = res?.data ?? {};
+    return { rows: data.notes, total: num(data.count), isLastPage: bool(data.is_last_page) ?? false };
+  });
+}
+async function creatorNotes(client, urlname, opts = {}) {
+  return paginate(opts.limit ?? 50, 50, async (_offset, _size, pageIndex) => {
+    const res = await client.request(`/v2/creators/${encodeURIComponent(urlname)}/contents`, {
+      auth: "optional",
+      query: { kind: "note", page: pageIndex + 1 }
+    });
+    const data = res?.data ?? {};
+    return { rows: data.contents, total: num(data.totalCount), isLastPage: bool(data.isLastPage) ?? false };
+  });
+}
+async function getCreator(client, urlname) {
+  const res = await client.request(`/v2/creators/${encodeURIComponent(urlname)}`, { auth: "optional" });
+  return res?.data;
+}
+async function getNote(client, key) {
+  const res = await client.request(`/v3/notes/${encodeURIComponent(key)}`, { auth: "optional" });
+  return res?.data;
+}
+async function currentUser(client) {
+  const res = await client.request("/v2/current_user", { auth: "required" });
+  if (!res?.data)
+    throw new CliError("AUTH_ERROR", "current_user returned no data; session is likely invalid.");
+  return res.data;
+}
+async function getDraft(client, key) {
+  const res = await client.request(`/v3/notes/${encodeURIComponent(key)}`, {
+    auth: "required",
+    query: { draft: "true", draft_reedit: "false" }
+  });
+  return res?.data;
+}
+async function resolveNoteId(client, ref) {
+  if ("id" in ref)
+    return { id: ref.id, key: null };
+  const data = await getDraft(client, ref.key);
+  if (!data?.id)
+    throw new CliError("NOT_FOUND", `Could not resolve note id for "${ref.key}".`);
+  return { id: Number(data.id), key: data.key ?? ref.key };
+}
+async function myNotes(client, page = 1) {
+  const res = await client.request("/v2/note_list/contents", { auth: "required", query: { page } });
+  const data = res?.data ?? {};
+  const list = data.notes ?? data.contents ?? (Array.isArray(data) ? data : undefined);
+  const { items, skipped } = normalizeNotes(list);
+  return { items, skipped, isLastPage: bool(data.isLastPage) ?? bool(data.is_last_page) };
+}
+function editUrl(key) {
+  return `${EDITOR_ORIGIN}/notes/${key}/edit/`;
+}
+async function createDraft(client, title) {
+  const res = await client.request("/v1/text_notes", {
+    method: "POST",
+    auth: "required",
+    editor: true,
+    json: { body: "<p></p>", body_length: 0, name: title, index: false, is_lead_form: false }
+  });
+  const d = res?.data ?? res;
+  const note = d?.note ?? d?.text_note ?? d;
+  const id = note?.id ?? d?.note_id;
+  const key = note?.key ?? d?.note_key;
+  if (!id || !key) {
+    throw new CliError("API_ERROR", "Draft was created but id/key were missing from the response.", { detail: res });
+  }
+  return { id: Number(id), key, editUrl: editUrl(key) };
+}
+async function saveDraft(client, id, body) {
+  const res = await client.request("/v1/text_notes/draft_save", {
+    method: "POST",
+    auth: "required",
+    editor: true,
+    query: { id },
+    json: { name: body.title, body: body.html, body_length: body.bodyLength, index: false, is_lead_form: false }
+  });
+  return res?.data ?? res;
+}
+async function deleteDraft(client, id) {
+  const res = await client.request("/v1/text_notes/draft_delete", {
+    method: "DELETE",
+    auth: "required",
+    editor: true,
+    query: { id }
+  });
+  return res?.data ?? res;
+}
+async function statsPv(client, opts = {}) {
+  const res = await client.request("/v1/stats/pv", {
+    auth: "required",
+    query: { filter: opts.filter ?? "all", page: opts.page ?? 1, sort: opts.sort ?? "pv" }
+  });
+  return res?.data ?? res;
+}
+
+// src/login.ts
+import { spawn } from "child_process";
+import { existsSync } from "fs";
+import { mkdtemp, readFile as readFile2, rm as rm2 } from "fs/promises";
+import { tmpdir } from "os";
+import { join as join2 } from "path";
+function browserCandidates() {
+  switch (process.platform) {
+    case "darwin":
+      return [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium"
+      ];
+    case "win32": {
+      const roots = [process.env["PROGRAMFILES"], process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA].filter(Boolean);
+      return roots.flatMap((r) => [
+        join2(r, "Google/Chrome/Application/chrome.exe"),
+        join2(r, "Microsoft/Edge/Application/msedge.exe")
+      ]);
+    }
+    default:
+      return ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/microsoft-edge"];
+  }
+}
+function findBrowser(explicit) {
+  const path = explicit || process.env.NOTE_CLI_BROWSER || browserCandidates().find((p) => existsSync(p));
+  if (!path || !existsSync(path)) {
+    throw new CliError("BROWSER_NOT_FOUND", "No Chrome/Edge/Chromium found. Pass --browser <path> (or set NOTE_CLI_BROWSER), or use `note-cli auth import`.");
+  }
+  return path;
+}
+
+class Cdp {
+  nextId = 1;
+  pending = new Map;
+  ws;
+  constructor(ws) {
+    this.ws = ws;
+    ws.addEventListener("message", (ev) => {
+      const msg = JSON.parse(String(ev.data));
+      const p = msg.id ? this.pending.get(msg.id) : undefined;
+      if (!p)
+        return;
+      this.pending.delete(msg.id);
+      if (msg.error)
+        p.reject(new Error(msg.error.message));
+      else
+        p.resolve(msg.result);
+    });
+  }
+  static connect(url) {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(url);
+      ws.addEventListener("open", () => resolve(new Cdp(ws)), { once: true });
+      ws.addEventListener("error", () => reject(new Error(`Cannot connect to ${url}`)), { once: true });
+    });
+  }
+  send(method, params = {}) {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      this.ws.send(JSON.stringify({ id, method, params }));
+    });
+  }
+  close() {
+    this.ws.close();
+  }
+}
+var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitForDevToolsPort(profileDir, proc, timeoutMs = 20000) {
+  const file = join2(profileDir, "DevToolsActivePort");
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (proc.exitCode !== null)
+      throw new CliError("BROWSER_LAUNCH_FAILED", "Browser exited before it was ready.");
+    try {
+      const [port, path] = (await readFile2(file, "utf8")).trim().split(`
+`);
+      if (port && path)
+        return `ws://127.0.0.1:${port}${path}`;
+    } catch {}
+    await sleep(200);
+  }
+  throw new CliError("BROWSER_LAUNCH_FAILED", "Timed out waiting for the browser's DevTools port.");
+}
+async function browserLogin(opts) {
+  const executable = findBrowser(opts.browser);
+  const profileDir = await mkdtemp(join2(tmpdir(), "note-cli-login-"));
+  const proc = spawn(executable, [
+    `--user-data-dir=${profileDir}`,
+    "--remote-debugging-port=0",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "https://note.com/login"
+  ], { stdio: "ignore" });
+  let cdp;
+  try {
+    cdp = await Cdp.connect(await waitForDevToolsPort(profileDir, proc));
+    console.error("Log in to note.com in the opened browser window. Waiting...");
+    const deadline = Date.now() + opts.timeoutSec * 1000;
+    while (Date.now() < deadline) {
+      if (proc.exitCode !== null)
+        throw new CliError("LOGIN_ABORTED", "The browser was closed before login completed.");
+      const { targetInfos } = await cdp.send("Target.getTargets");
+      const onLoginPage = targetInfos.some((t) => t.type === "page" && /note\.com\/login/.test(t.url));
+      if (!onLoginPage) {
+        const { cookies } = await cdp.send("Storage.getCookies");
+        const map = Object.fromEntries(cookies.filter((c2) => /(^|\.)note\.com$/.test(c2.domain.replace(/^\./, ""))).map((c2) => [c2.name, c2.value]));
+        if (map._note_session_v5 && await opts.isLoggedIn(map))
+          return map;
+      }
+      await sleep(1500);
+    }
+    throw new CliError("LOGIN_TIMEOUT", `Login was not completed within ${opts.timeoutSec}s.`);
+  } finally {
+    cdp?.close();
+    proc.kill();
+    await sleep(300);
+    await rm2(profileDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// src/validate.ts
+var NOTE_KEY = /^n[0-9a-z]{6,32}$/;
+var URLNAME = /^[A-Za-z0-9_-]{1,64}$/;
+function noteKey(input) {
+  const s = input.trim();
+  const fromUrl = s.match(/(?:^|\/)(n[0-9a-z]{6,32})(?:[/?#]|$)/)?.[1];
+  const key = fromUrl ?? s;
+  if (!NOTE_KEY.test(key))
+    throw new CliError("USAGE", `Not a note key or note URL: "${input}". Expected something like n1a2b3c4d5e6.`);
+  return key;
+}
+function noteIdOrKey(input) {
+  const s = input.trim();
+  if (/^\d{1,12}$/.test(s))
+    return { id: Number(s) };
+  return { key: noteKey(s) };
+}
+function urlname(input) {
+  const s = input.trim().replace(/^@/, "");
+  const fromUrl = s.match(/^https?:\/\/note\.com\/([^/?#]+)/)?.[1];
+  const name = fromUrl ?? s;
+  if (!URLNAME.test(name))
+    throw new CliError("USAGE", `Not a note urlname: "${input}". Use letters, digits, _ or -.`);
+  return name;
+}
+function hashtag(input) {
+  const name = input.trim().replace(/^#/, "");
+  if (!name || name.length > 100 || /[\s/\\?#%]/.test(name) || /^\.+$/.test(name)) {
+    throw new CliError("USAGE", `Not a valid hashtag: "${input}".`);
+  }
+  return name;
+}
+
 // src/cli.ts
 var SORTS = ["popular", "hot", "new"];
+var DEFAULT_MAX_CHARS = "20000";
 var COMMANDS = {
   "auth login": {
     usage: "auth login [--timeout <sec>] [--browser <path to Chrome/Edge/Chromium>]",
@@ -2241,16 +2325,12 @@ var COMMANDS = {
     }
   },
   "auth import": {
-    usage: "auth import [--cookie '<Cookie header>']   (or pipe the header via stdin)",
-    summary: "Save a session from a Cookie header copied from browser DevTools",
+    usage: "auth import [--cookie '<Cookie header or _note_session_v5 value>']   (or pipe it via stdin)",
+    summary: "Save a session from a Cookie header (or just the _note_session_v5 value) copied from browser DevTools",
     options: { cookie: { type: "string" } },
     async run({ values }) {
       const raw = typeof values.cookie === "string" ? values.cookie : await readStdin();
-      const cookies = parseCookieHeader(raw.trim());
-      if (!cookies._note_session_v5) {
-        throw new CliError("INVALID_INPUT", "The cookie string must contain _note_session_v5.");
-      }
-      return finishLogin(cookies);
+      return finishLogin(parseImportedCookies(raw));
     }
   },
   "auth status": {
@@ -2298,10 +2378,11 @@ var COMMANDS = {
     options: { title: { type: "string" }, "dry-run": { type: "boolean" } },
     args: 2,
     async run({ values, positionals, client }) {
+      const ref = noteIdOrKey(positionals[0]);
       const article = await loadArticle(positionals[1], values.title);
       if (values["dry-run"])
         return { dryRun: true, ...article };
-      const { id, key } = await resolveNoteId(client, positionals[0]);
+      const { id, key } = await resolveNoteId(client, ref);
       await saveDraft(client, id, article);
       return {
         updated: true,
@@ -2315,21 +2396,25 @@ var COMMANDS = {
     }
   },
   "draft get": {
-    usage: "draft get <key|url> [--html]",
+    usage: "draft get <key|url> [--html] [--max-chars <n>]",
     summary: "Read a draft (or your own article) as the editor sees it",
-    options: { html: { type: "boolean" } },
+    options: { html: { type: "boolean" }, "max-chars": { type: "string", default: DEFAULT_MAX_CHARS } },
     args: 1,
     async run({ values, positionals, client }) {
-      const data = await getDraft(client, noteKey(positionals[0]));
-      const draft = data?.note_draft ?? data;
-      const html = draft?.body ?? data?.body ?? "";
+      const key = noteKey(positionals[0]);
+      const maxChars = int(values["max-chars"], "max-chars");
+      const data = await getDraft(client, key);
+      if (!data || typeof data !== "object")
+        throw new CliError("NOT_FOUND", `No draft data for ${key}.`);
+      const draft = data.note_draft ?? data;
+      const html = typeof draft.body === "string" ? draft.body : typeof data.body === "string" ? data.body : "";
       return {
-        id: data?.id,
-        key: data?.key,
-        status: data?.status,
-        title: draft?.name ?? data?.name,
-        editUrl: data?.key ? editUrl(data.key) : null,
-        ...values.html ? { bodyHtml: html } : { bodyText: htmlToText(html) }
+        id: data.id,
+        key: data.key,
+        status: data.status,
+        title: draft.name ?? data.name,
+        editUrl: data.key ? editUrl(data.key) : null,
+        ...bodyField(html, Boolean(values.html), maxChars)
       };
     }
   },
@@ -2340,7 +2425,7 @@ var COMMANDS = {
     async run({ values, client }) {
       const res = await myNotes(client, int(values.page, "page"));
       const items = values.status ? res.items.filter((n) => n.status === values.status) : res.items;
-      return { page: int(values.page, "page"), isLastPage: res.isLastPage, count: items.length, notes: items };
+      return { page: int(values.page, "page"), isLastPage: res.isLastPage, count: items.length, notes: items, ...skippedField(res.skipped) };
     }
   },
   "draft delete": {
@@ -2349,9 +2434,10 @@ var COMMANDS = {
     options: { yes: { type: "boolean" } },
     args: 1,
     async run({ values, positionals, client }) {
+      const ref = noteIdOrKey(positionals[0]);
       if (!values.yes)
         throw new CliError("CONFIRMATION_REQUIRED", "Pass --yes to delete the draft.");
-      const { id, key } = await resolveNoteId(client, positionals[0]);
+      const { id, key } = await resolveNoteId(client, ref);
       await deleteDraft(client, id);
       return { deleted: true, id, key };
     }
@@ -2372,7 +2458,7 @@ var COMMANDS = {
         limit: int(values.limit, "limit"),
         start: int(values.start, "start")
       });
-      return { query: q2, total: res.total, count: res.items.length, notes: res.items };
+      return { query: q2, total: res.total, count: res.items.length, exhausted: res.exhausted, notes: res.items, ...skippedField(res.skipped) };
     }
   },
   hashtag: {
@@ -2385,12 +2471,13 @@ var COMMANDS = {
     },
     args: 1,
     async run({ values, positionals, client }) {
-      const res = await hashtagNotes(client, positionals[0], {
+      const tag = hashtag(positionals[0]);
+      const res = await hashtagNotes(client, tag, {
         order: oneOf(values.order, SORTS, "order"),
         limit: int(values.limit, "limit"),
         paidOnly: Boolean(values["paid-only"])
       });
-      return { hashtag: positionals[0].replace(/^#/, ""), total: res.total, count: res.items.length, notes: res.items };
+      return { hashtag: tag, total: res.total, count: res.items.length, exhausted: res.exhausted, notes: res.items, ...skippedField(res.skipped) };
     }
   },
   user: {
@@ -2399,9 +2486,9 @@ var COMMANDS = {
     options: { limit: { type: "string", default: "20" } },
     args: 1,
     async run({ values, positionals, client }) {
-      const urlname = positionals[0];
-      const creator = await getCreator(client, urlname);
-      const res = await creatorNotes(client, urlname, { limit: int(values.limit, "limit") });
+      const urlname2 = urlname(positionals[0]);
+      const creator = await getCreator(client, urlname2);
+      const res = await creatorNotes(client, urlname2, { limit: int(values.limit, "limit") });
       return {
         profile: {
           urlname: creator?.urlname,
@@ -2413,23 +2500,31 @@ var COMMANDS = {
         },
         total: res.total,
         count: res.items.length,
-        notes: res.items
+        exhausted: res.exhausted,
+        notes: res.items,
+        ...skippedField(res.skipped)
       };
     }
   },
   note: {
-    usage: "note <key|url> [--html]",
-    summary: "Read a published article (summary + body text)",
-    options: { html: { type: "boolean" } },
+    usage: "note <key|url> [--html] [--max-chars <n>]",
+    summary: "Read a published article (summary + body text; paid parts are hidden)",
+    options: { html: { type: "boolean" }, "max-chars": { type: "string", default: DEFAULT_MAX_CHARS } },
     args: 1,
     async run({ values, positionals, client }) {
-      const data = await getNote(client, noteKey(positionals[0]));
-      const body = data?.body ?? "";
+      const key = noteKey(positionals[0]);
+      const maxChars = int(values["max-chars"], "max-chars");
+      const data = await getNote(client, key);
+      const summary = tryNormalizeNote(data);
+      if (typeof summary === "string") {
+        throw new CliError("API_ERROR", `Unexpected response for ${key}: ${summary}.`);
+      }
+      const body = typeof data.body === "string" ? data.body : "";
       return {
-        ...normalizeNote(data ?? {}),
-        description: data?.description ?? null,
-        canRead: data?.can_read ?? data?.canRead ?? null,
-        ...values.html ? { bodyHtml: body } : { bodyText: htmlToText(body) }
+        ...summary,
+        description: data.description ?? null,
+        canRead: data.can_read ?? data.canRead ?? null,
+        ...bodyField(body, Boolean(values.html), maxChars)
       };
     }
   },
@@ -2448,7 +2543,7 @@ var COMMANDS = {
         sort: oneOf(values.sort, SORTS, "sort"),
         limit: int(values.limit, "limit")
       });
-      return { source: { type: "search", query: q2, sort: values.sort, total: res.total }, ...analyzeNotes(res.items, { top: int(values.top, "top") }) };
+      return { source: { type: "search", query: q2, sort: values.sort, total: res.total }, ...skippedField(res.skipped), ...analyzeNotes(res.items, { top: int(values.top, "top") }) };
     }
   },
   "analyze hashtag": {
@@ -2461,11 +2556,12 @@ var COMMANDS = {
     },
     args: 1,
     async run({ values, positionals, client }) {
-      const res = await hashtagNotes(client, positionals[0], {
+      const tag = hashtag(positionals[0]);
+      const res = await hashtagNotes(client, tag, {
         order: oneOf(values.order, SORTS, "order"),
         limit: int(values.limit, "limit")
       });
-      return { source: { type: "hashtag", hashtag: positionals[0], order: values.order, total: res.total }, ...analyzeNotes(res.items, { top: int(values.top, "top") }) };
+      return { source: { type: "hashtag", hashtag: tag, order: values.order, total: res.total }, ...skippedField(res.skipped), ...analyzeNotes(res.items, { top: int(values.top, "top") }) };
     }
   },
   "analyze user": {
@@ -2474,12 +2570,13 @@ var COMMANDS = {
     options: { limit: { type: "string", default: "100" }, top: { type: "string", default: "10" } },
     args: 1,
     async run({ values, positionals, client }) {
-      const res = await creatorNotes(client, positionals[0], { limit: int(values.limit, "limit") });
-      return { source: { type: "user", urlname: positionals[0], total: res.total }, ...analyzeNotes(res.items, { top: int(values.top, "top") }) };
+      const urlname2 = urlname(positionals[0]);
+      const res = await creatorNotes(client, urlname2, { limit: int(values.limit, "limit") });
+      return { source: { type: "user", urlname: urlname2, total: res.total }, ...skippedField(res.skipped), ...analyzeNotes(res.items, { top: int(values.top, "top") }) };
     }
   },
   "stats pv": {
-    usage: "stats pv [--filter all|daily|weekly|monthly] [--sort pv|like|comment] [--page <n>]",
+    usage: "stats pv [--filter all|daily|weekly|monthly|yearly] [--sort pv|like|comment] [--page <n>]",
     summary: "Your own page views / likes / comments per article (requires login)",
     options: {
       filter: { type: "string", default: "all" },
@@ -2488,7 +2585,7 @@ var COMMANDS = {
     },
     async run({ values, client }) {
       return statsPv(client, {
-        filter: oneOf(values.filter, ["all", "daily", "weekly", "monthly"], "filter"),
+        filter: oneOf(values.filter, ["all", "daily", "weekly", "monthly", "yearly"], "filter"),
         sort: oneOf(values.sort, ["pv", "like", "comment"], "sort"),
         page: int(values.page, "page")
       });
@@ -2512,9 +2609,23 @@ async function loadArticle(file, titleOverride) {
   const { html, bodyLength, warnings } = markdownToNoteHtml(parsed.markdown);
   return { title, html, bodyLength, warnings };
 }
-function noteKey(input) {
-  const m = input.match(/(?:^|\/)(n[0-9a-f]{12,})(?:[/?#]|$)/);
-  return m ? m[1] : input;
+function parseImportedCookies(raw) {
+  const s = raw.trim();
+  const cookies = s.includes("=") ? parseCookieHeader(s) : s ? { _note_session_v5: s } : {};
+  if (!cookies._note_session_v5) {
+    throw new CliError("INVALID_INPUT", "Expected a Cookie header containing _note_session_v5, or the _note_session_v5 value itself.");
+  }
+  return cookies;
+}
+function bodyField(html, asHtml, maxChars) {
+  const full = asHtml ? html : htmlToText(html);
+  const chars = [...full];
+  const truncated = maxChars > 0 && chars.length > maxChars;
+  const body = truncated ? chars.slice(0, maxChars).join("") : full;
+  return { ...asHtml ? { bodyHtml: body } : { bodyText: body }, bodyChars: chars.length, truncated };
+}
+function skippedField(skipped) {
+  return skipped.length ? { skipped: { count: skipped.length, rows: skipped.slice(0, 10) } } : {};
 }
 function int(v, name) {
   const n = Number(v);

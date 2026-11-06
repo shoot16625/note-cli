@@ -1,5 +1,5 @@
 import { CliError, EDITOR_ORIGIN, type NoteClient } from "./client.ts";
-import { normalizeNote, type NoteSummary } from "./normalize.ts";
+import { normalizeNotes, type NoteSummary, type Skipped } from "./normalize.ts";
 
 export type SearchSort = "popular" | "hot" | "new";
 export type HashtagOrder = "popular" | "hot" | "new";
@@ -7,9 +7,58 @@ export type HashtagOrder = "popular" | "hot" | "new";
 export interface Page<T> {
   items: T[];
   total: number | null;
-  /** true when the API reported no more pages (or the limit was reached exactly at the end) */
+  /** true when the source has no more results beyond what was fetched */
   exhausted: boolean;
+  /** rows dropped because they lacked required fields (a sign the unofficial API changed) */
+  skipped: Skipped[];
 }
+
+interface Batch {
+  rows: unknown;
+  total: number | null;
+  /** the API's own "last page" flag, when it sends one */
+  isLastPage: boolean | null;
+}
+
+/**
+ * Shared pagination loop. Stops at `limit`, on an empty batch, on an explicit last-page flag,
+ * when `total` has been reached, or when a batch comes back shorter than requested.
+ */
+async function paginate(
+  limit: number,
+  pageSize: number,
+  fetchBatch: (offset: number, size: number, pageIndex: number) => Promise<Batch>,
+  startOffset = 0,
+): Promise<Page<NoteSummary>> {
+  const items: NoteSummary[] = [];
+  const skipped: Skipped[] = [];
+  let total: number | null = null;
+  let exhausted = false;
+  let offset = startOffset;
+  for (let pageIndex = 0; items.length < limit; pageIndex++) {
+    const size = Math.min(pageSize, limit - items.length);
+    const batch = await fetchBatch(offset, size, pageIndex);
+    const rowCount = Array.isArray(batch.rows) ? batch.rows.length : 0;
+    const normalized = normalizeNotes(batch.rows, offset);
+    items.push(...normalized.items);
+    skipped.push(...normalized.skipped);
+    total = batch.total ?? total;
+    offset += rowCount;
+    if (
+      rowCount === 0 ||
+      batch.isLastPage === true ||
+      (total !== null && offset >= total) ||
+      (batch.isLastPage === null && rowCount < size)
+    ) {
+      exhausted = true;
+      break;
+    }
+  }
+  return { items: items.slice(0, limit), total, exhausted, skipped };
+}
+
+const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
+const bool = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
 
 // ---------- read (public) ----------
 
@@ -18,28 +67,20 @@ export async function searchNotes(
   q: string,
   opts: { sort?: SearchSort; limit?: number; start?: number } = {},
 ): Promise<Page<NoteSummary>> {
-  const limit = opts.limit ?? 20;
-  const pageSize = 20; // the API caps size at ~20
-  let start = opts.start ?? 0;
-  const items: NoteSummary[] = [];
-  let total: number | null = null;
-  let exhausted = false;
-  while (items.length < limit) {
-    const res = await client.request("/v3/searches", {
-      auth: "optional",
-      query: { context: "note", q, size: Math.min(pageSize, limit - items.length), start, sort: opts.sort ?? "popular" },
-    });
-    const notes = res?.data?.notes ?? {};
-    const contents: any[] = notes.contents ?? [];
-    total = notes.total_count ?? total;
-    items.push(...contents.map(normalizeNote));
-    start += contents.length;
-    if (notes.is_last_page || contents.length === 0) {
-      exhausted = true;
-      break;
-    }
-  }
-  return { items: items.slice(0, limit), total, exhausted };
+  // v3/searches caps size at ~20 and always sends is_last_page: null, so rely on total_count.
+  return paginate(
+    opts.limit ?? 20,
+    20,
+    async (start, size) => {
+      const res = await client.request("/v3/searches", {
+        auth: "optional",
+        query: { context: "note", q, size, start, sort: opts.sort ?? "popular" },
+      });
+      const notes = res?.data?.notes ?? {};
+      return { rows: notes.contents, total: num(notes.total_count), isLastPage: bool(notes.is_last_page) };
+    },
+    opts.start ?? 0,
+  );
 }
 
 export async function hashtagNotes(
@@ -47,26 +88,15 @@ export async function hashtagNotes(
   tag: string,
   opts: { order?: HashtagOrder; limit?: number; paidOnly?: boolean } = {},
 ): Promise<Page<NoteSummary>> {
-  const limit = opts.limit ?? 50;
-  const name = tag.replace(/^#/, "");
-  const items: NoteSummary[] = [];
-  let total: number | null = null;
-  let exhausted = false;
-  for (let page = 1; items.length < limit; page++) {
-    const res = await client.request(`/v3/hashtags/${encodeURIComponent(name)}/notes`, {
+  // Fixed 50 rows per page; `size` is not a parameter, so the short-batch rule is disabled via isLastPage.
+  return paginate(opts.limit ?? 50, 50, async (_offset, _size, pageIndex) => {
+    const res = await client.request(`/v3/hashtags/${encodeURIComponent(tag)}/notes`, {
       auth: "optional",
-      query: { order: opts.order ?? "popular", page, paid_only: opts.paidOnly ? "true" : undefined },
+      query: { order: opts.order ?? "popular", page: pageIndex + 1, paid_only: opts.paidOnly ? "true" : undefined },
     });
     const data = res?.data ?? {};
-    const notes: any[] = data.notes ?? [];
-    total = data.count ?? total;
-    items.push(...notes.map(normalizeNote));
-    if (data.is_last_page || notes.length === 0) {
-      exhausted = true;
-      break;
-    }
-  }
-  return { items: items.slice(0, limit), total, exhausted };
+    return { rows: data.notes, total: num(data.count), isLastPage: bool(data.is_last_page) ?? false };
+  });
 }
 
 export async function creatorNotes(
@@ -74,25 +104,14 @@ export async function creatorNotes(
   urlname: string,
   opts: { limit?: number } = {},
 ): Promise<Page<NoteSummary>> {
-  const limit = opts.limit ?? 50;
-  const items: NoteSummary[] = [];
-  let total: number | null = null;
-  let exhausted = false;
-  for (let page = 1; items.length < limit; page++) {
+  return paginate(opts.limit ?? 50, 50, async (_offset, _size, pageIndex) => {
     const res = await client.request(`/v2/creators/${encodeURIComponent(urlname)}/contents`, {
       auth: "optional",
-      query: { kind: "note", page },
+      query: { kind: "note", page: pageIndex + 1 },
     });
     const data = res?.data ?? {};
-    const contents: any[] = data.contents ?? [];
-    total = data.totalCount ?? total;
-    items.push(...contents.map(normalizeNote));
-    if (data.isLastPage || contents.length === 0) {
-      exhausted = true;
-      break;
-    }
-  }
-  return { items: items.slice(0, limit), total, exhausted };
+    return { rows: data.contents, total: num(data.totalCount), isLastPage: bool(data.isLastPage) ?? false };
+  });
 }
 
 export async function getCreator(client: NoteClient, urlname: string): Promise<any> {
@@ -121,20 +140,26 @@ export async function getDraft(client: NoteClient, key: string): Promise<any> {
   return res?.data;
 }
 
-/** Accept either a numeric id or an `n...` key and return the numeric id. */
-export async function resolveNoteId(client: NoteClient, idOrKey: string): Promise<{ id: number; key: string | null }> {
-  if (/^\d+$/.test(idOrKey)) return { id: Number(idOrKey), key: null };
-  const key = idOrKey.match(/n[0-9a-f]{12,}/)?.[0] ?? idOrKey;
-  const data = await getDraft(client, key);
-  if (!data?.id) throw new CliError("NOT_FOUND", `Could not resolve note id for "${idOrKey}".`);
-  return { id: Number(data.id), key: data.key ?? key };
+/** Turn a validated numeric id or note key into the numeric id the draft APIs need. */
+export async function resolveNoteId(
+  client: NoteClient,
+  ref: { id: number } | { key: string },
+): Promise<{ id: number; key: string | null }> {
+  if ("id" in ref) return { id: ref.id, key: null };
+  const data = await getDraft(client, ref.key);
+  if (!data?.id) throw new CliError("NOT_FOUND", `Could not resolve note id for "${ref.key}".`);
+  return { id: Number(data.id), key: data.key ?? ref.key };
 }
 
-export async function myNotes(client: NoteClient, page = 1): Promise<{ items: NoteSummary[]; isLastPage: boolean | null }> {
+export async function myNotes(
+  client: NoteClient,
+  page = 1,
+): Promise<{ items: NoteSummary[]; skipped: Skipped[]; isLastPage: boolean | null }> {
   const res = await client.request("/v2/note_list/contents", { auth: "required", query: { page } });
   const data = res?.data ?? {};
-  const list: any[] = data.notes ?? data.contents ?? (Array.isArray(data) ? data : []);
-  return { items: list.map(normalizeNote), isLastPage: data.isLastPage ?? data.is_last_page ?? null };
+  const list = data.notes ?? data.contents ?? (Array.isArray(data) ? data : undefined);
+  const { items, skipped } = normalizeNotes(list);
+  return { items, skipped, isLastPage: bool(data.isLastPage) ?? bool(data.is_last_page) };
 }
 
 export interface DraftRef {
@@ -190,7 +215,7 @@ export async function deleteDraft(client: NoteClient, id: number): Promise<unkno
   return res?.data ?? res;
 }
 
-export type PvFilter = "all" | "daily" | "weekly" | "monthly";
+export type PvFilter = "all" | "daily" | "weekly" | "monthly" | "yearly";
 export type PvSort = "pv" | "like" | "comment";
 
 export async function statsPv(

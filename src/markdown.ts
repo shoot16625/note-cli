@@ -58,12 +58,22 @@ export function markdownToNoteHtml(markdown: string): ConvertResult {
         if (token.depth === 3) return `<h3>${inner}</h3>\n`;
         return `<p><strong>${inner}</strong></p>\n`;
       },
+      link(this: any, token: Tokens.Link) {
+        const inner = this.parser.parseInline(token.tokens);
+        const href = safeHref(token.href);
+        if (!href) {
+          warnings.push(`Link "${token.href}" was dropped (only http, https and mailto links are allowed).`);
+          return inner;
+        }
+        return `<a href="${escapeAttr(href)}">${inner}</a>`;
+      },
       image(token: Tokens.Image) {
-        warnings.push(
-          `Image "${token.href}" was not uploaded (image upload is not supported yet); replaced with a link. Add it in the note editor.`,
-        );
         const label = escapeHtml(token.text || token.href);
-        return `<a href="${escapeAttr(token.href)}">${label}</a>`;
+        const href = safeHref(token.href);
+        warnings.push(
+          `Image "${token.href}" was not uploaded (image upload is not supported yet); ${href ? "replaced with a link" : "replaced with its alt text"}. Add it in the note editor.`,
+        );
+        return href ? `<a href="${escapeAttr(href)}">${label}</a>` : label;
       },
       table(this: any, token: Tokens.Table) {
         warnings.push("Tables are not supported by note.com; rendered as a code block.");
@@ -100,11 +110,22 @@ function addBlockIds(html: string): string {
   });
 }
 
+/** Allow only absolute http(s) and mailto URLs; everything else (javascript:, data:, relative paths, ...) is dropped. */
+export function safeHref(href: string): string | null {
+  const trimmed = href.trim();
+  try {
+    const url = new URL(trimmed);
+    return ["http:", "https:", "mailto:"].includes(url.protocol) ? trimmed : null;
+  } catch {
+    return null;
+  }
+}
+
 function stripDangerous(html: string): string {
+  // Defense in depth: renderers above already escape raw HTML and filter link schemes.
   return html
     .replace(/<(script|iframe|object|embed|form|style)[^>]*>[\s\S]*?<\/\1>/gi, "")
-    .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*')/gi, "")
-    .replace(/href="javascript:[^"]*"/gi, 'href="#"');
+    .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*')/gi, "");
 }
 
 export function visibleTextLength(html: string): number {

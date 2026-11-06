@@ -18,7 +18,7 @@ Output is JSON on stdout. Errors are JSON on stderr (`{"error": {"code", "messag
 
 ## Login (only for commands that need it)
 
-`note-cli auth status` tells you whether a session exists. To log in, run `note-cli auth login` yourself with a command timeout of at least 300 seconds. It opens a Chrome/Edge/Chromium window on the note.com login page and waits for the user to finish logging in there. Tell the user to log in in that window. Never ask for their password. If no browser is found, pass `--browser <path>`, or have the user copy the `Cookie` request header from DevTools and pipe it to `note-cli auth import`.
+`note-cli auth status` tells you whether a session exists. To log in, run `note-cli auth login` yourself with a command timeout of at least 300 seconds. It opens a Chrome/Edge/Chromium window on the note.com login page and waits for the user to finish logging in there. Tell the user to log in in that window. Never ask for their password. If no browser is found, pass `--browser <path>`, or have the user copy the `Cookie` request header (or just the `_note_session_v5` value) from DevTools and pipe it to `note-cli auth import`.
 
 ## Before you start
 
@@ -31,7 +31,7 @@ Output is JSON on stdout. Errors are JSON on stderr (`{"error": {"code", "messag
 note-cli draft create article.md --dry-run   # preview converted HTML + warnings, no network
 note-cli draft create article.md             # -> {id, key, editUrl, warnings}
 note-cli draft update <id|key|url> article.md  # overwrite title + body of an existing draft
-note-cli draft get <key|url>                 # read a draft back as text (--html for raw)
+note-cli draft get <key|url>                 # read a draft back as text (--html for raw, --max-chars N, default 20000)
 note-cli draft list --status draft           # your drafts (page 1; --page N)
 note-cli draft delete <id|key> --yes         # drafts only; ask the user before running
 ```

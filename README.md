@@ -59,7 +59,7 @@ Since 2026-05, note's email/password login API requires reCAPTCHA. note-cli ther
 ```bash
 note-cli auth login                  # opens Chrome/Edge/Chromium on the login page; log in there
 note-cli auth login --browser "/path/to/chrome"
-note-cli auth import --cookie '_note_session_v5=...; XSRF-TOKEN=...'   # or paste a Cookie header from DevTools
+note-cli auth import --cookie '_note_session_v5=...; XSRF-TOKEN=...'   # a Cookie header from DevTools, or just the _note_session_v5 value
 note-cli auth status
 note-cli auth logout
 ```
@@ -76,7 +76,7 @@ Your note account must have a verified email address before it can create drafts
 # Drafts (login required)
 note-cli draft create article.md [--title T] [--dry-run]
 note-cli draft update <id|key|url> article.md
-note-cli draft get <key|url> [--html]
+note-cli draft get <key|url> [--html] [--max-chars N]
 note-cli draft list [--page N] [--status draft|published]
 note-cli draft delete <id|key|url> --yes
 
@@ -84,14 +84,18 @@ note-cli draft delete <id|key|url> --yes
 note-cli search "<query>" [--sort popular|hot|new] [--limit N] [--start N]
 note-cli hashtag <tag> [--order popular|hot|new] [--limit N] [--paid-only]
 note-cli user <urlname> [--limit N]
-note-cli note <key|url> [--html]
+note-cli note <key|url> [--html] [--max-chars N]
 
 # Analysis
 note-cli analyze search "<query>" [--sort ...] [--limit 100] [--top 10]
 note-cli analyze hashtag <tag> [--order ...] [--limit 100]
 note-cli analyze user <urlname> [--limit 100]
-note-cli stats pv [--filter all|daily|weekly|monthly] [--sort pv|like|comment] [--page N]   # login required
+note-cli stats pv [--filter all|daily|weekly|monthly|yearly] [--sort pv|like|comment] [--page N]   # login required
 ```
+
+Article bodies are cut at 20,000 characters by default (`--max-chars 0` for no limit); the output reports `bodyChars` and `truncated`. List outputs report `exhausted`, plus `skipped` when rows could not be read, which usually means the unofficial API changed.
+
+Identifiers are validated before any request: note keys (`n...`) or note URLs, urlnames (letters, digits, `_`, `-`), and hashtags without `/ \ ? # %` or whitespace.
 
 Errors go to stderr as `{"error": {"code", "message", ...}}`. The exit code is 1 for errors and 2 for usage mistakes.
 
@@ -103,7 +107,8 @@ Errors go to stderr as `{"error": {"code", "message", ...}}`. The exit code is 1
 | `###` | Small heading |
 | `####` and deeper | Bold paragraph |
 | Line break inside a paragraph | Line break (`<br>`) |
-| Lists, quotes, code blocks, links, bold, strikethrough, horizontal rules | Kept as is |
+| Lists, quotes, code blocks, bold, strikethrough, horizontal rules | Kept as is |
+| Links | Kept for `http`, `https` and `mailto`; other schemes are dropped, keeping the link text, with a warning |
 | Images | **Not supported yet**: replaced with a link, with a warning |
 | Tables | **Not supported by note**: rendered as a code block, with a warning |
 

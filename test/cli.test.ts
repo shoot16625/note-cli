@@ -3,9 +3,10 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "bun:test";
-import { main, noteKey } from "../src/cli.ts";
+import { main, noteKey, parseImportedCookies } from "../src/cli.ts";
 import { NoteClient } from "../src/client.ts";
 import { parseCookieHeader } from "../src/session.ts";
+import * as v from "../src/validate.ts";
 
 interface Call {
   method: string;
@@ -50,11 +51,32 @@ async function capture(fn: () => Promise<number>) {
   }
 }
 
-test("noteKey extracts keys from URLs and passes through other input", () => {
+test("noteKey extracts keys from URLs and rejects anything else", () => {
   assert.equal(noteKey("https://note.com/u/n/n6a10366298b0"), "n6a10366298b0");
   assert.equal(noteKey("https://editor.note.com/notes/n6a10366298b0/edit/"), "n6a10366298b0");
-  assert.equal(noteKey("n6a10366298b0"), "n6a10366298b0");
-  assert.equal(noteKey("123"), "123");
+  assert.equal(noteKey(" n6a10366298b0 "), "n6a10366298b0");
+  for (const bad of ["123", "../etc", "n6a1/../x", "https://note.com/u", ""]) {
+    assert.throws(() => noteKey(bad), /Not a note key/, bad);
+  }
+});
+
+test("urlname, hashtag and id-or-key validation", () => {
+  assert.equal(v.urlname("@marie_222"), "marie_222");
+  assert.equal(v.urlname("https://note.com/marie_222/n/n6a10366298b0"), "marie_222");
+  assert.throws(() => v.urlname("a/b"));
+  assert.throws(() => v.urlname(".."));
+  assert.equal(v.hashtag("#ClaudeCode"), "ClaudeCode");
+  assert.equal(v.hashtag("note分析"), "note分析");
+  for (const bad of ["..", ".", "a/b", "a?b", "a b", "#", "%2e%2e"]) assert.throws(() => v.hashtag(bad), bad);
+  assert.deepEqual(v.noteIdOrKey("189694229"), { id: 189694229 });
+  assert.deepEqual(v.noteIdOrKey("https://note.com/u/n/n4db206aeba44"), { key: "n4db206aeba44" });
+});
+
+test("auth import accepts a Cookie header or a bare session value", () => {
+  assert.deepEqual(parseImportedCookies("abc123\n"), { _note_session_v5: "abc123" });
+  assert.equal(parseImportedCookies("_note_session_v5=abc; XSRF-TOKEN=t")._note_session_v5, "abc");
+  assert.throws(() => parseImportedCookies("XSRF-TOKEN=t"), /_note_session_v5/);
+  assert.throws(() => parseImportedCookies("  "), /_note_session_v5/);
 });
 
 test("parseCookieHeader handles a DevTools-copied header", () => {
@@ -139,4 +161,56 @@ test("invalid enum option is a usage error", async () => {
   const { client } = fakeClient([], null);
   const r = await capture(() => main(["search", "x", "--sort", "bogus"], { client }));
   assert.equal(r.code, 2);
+});
+
+test("search stops on total_count when is_last_page is always null", async () => {
+  const note = (i: number) => ({ key: `nkey${String(i).padStart(4, "0")}`, name: `t${i}`, like_count: i, user: { urlname: "u" } });
+  const { client, calls } = fakeClient(
+    [
+      { body: { data: { notes: { contents: Array.from({ length: 20 }, (_, i) => note(i)), is_last_page: null, total_count: 23 } } } },
+      { body: { data: { notes: { contents: Array.from({ length: 3 }, (_, i) => note(20 + i)), is_last_page: null, total_count: 23 } } } },
+      { body: { data: { notes: { contents: [], is_last_page: null, total_count: 23 } } } },
+    ],
+    null,
+  );
+  const r = await capture(() => main(["search", "AI", "--limit", "100"], { client }));
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.count, 23);
+  assert.equal(out.exhausted, true);
+  assert.equal(calls.length, 2);
+});
+
+test("unreadable rows are skipped and reported", async () => {
+  const { client } = fakeClient(
+    [{ body: { data: { notes: { contents: [{ key: "nabcdef1", name: "ok" }, { name: "no key" }], total_count: 2 } } } }],
+    null,
+  );
+  const r = await capture(() => main(["search", "AI"], { client }));
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.count, 1);
+  assert.equal(out.skipped.count, 1);
+  assert.equal(out.skipped.rows[0].reason, "missing key");
+});
+
+test("note truncates long bodies and reports hashtags from hashtag_notes", async () => {
+  const body = `<p>${"あ".repeat(50)}</p>`;
+  const { client } = fakeClient(
+    [{ body: { data: { key: "nabcdef1", name: "T", body, user: { urlname: "u" }, hashtag_notes: [{ hashtag: { name: "#x" } }] } } }],
+    null,
+  );
+  const r = await capture(() => main(["note", "nabcdef1", "--max-chars", "10"], { client }));
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.bodyText, "あ".repeat(10));
+  assert.equal(out.bodyChars, 50);
+  assert.equal(out.truncated, true);
+  assert.deepEqual(out.hashtags, ["x"]);
+});
+
+test("invalid hashtag is rejected before any request", async () => {
+  const { client, calls } = fakeClient([], null);
+  const r = await capture(() => main(["hashtag", ".."], { client }));
+  assert.equal(r.code, 2);
+  assert.equal(calls.length, 0);
 });

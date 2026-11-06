@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
 import { analyzeNotes, numberStats } from "../src/analyze.ts";
-import { normalizeNote } from "../src/normalize.ts";
+import { normalizeNotes, tryNormalizeNote, type NoteSummary } from "../src/normalize.ts";
+
+function normalizeNote(raw: unknown): NoteSummary {
+  const n = tryNormalizeNote(raw);
+  if (typeof n === "string") throw new Error(n);
+  return n;
+}
 
 test("numberStats handles empty and odd-sized input", () => {
   assert.deepEqual(numberStats([]), { count: 0, mean: 0, median: 0, p90: 0, max: 0, min: 0 });
@@ -72,4 +78,35 @@ test("analyzeNotes summarizes likes, paid ratio, title features and JST timing",
   assert.deepEqual(a.topAuthors[0], { urlname: "a", nickname: null, count: 2, totalLikes: 110 });
   assert.equal(a.topNotes.length, 2);
   assert.equal(a.topNotes[0].likeCount, 100);
+});
+
+test("normalizeNote reads hashtags from hashtag_notes (v3 note detail)", () => {
+  const n = normalizeNote({
+    key: "nabcdef",
+    name: "T",
+    hashtags: null,
+    hashtag_notes: [{ hashtag: { name: "#note" } }, { hashtag: { name: "#API" } }],
+    user: { urlname: "u" },
+  });
+  assert.deepEqual(n.hashtags, ["note", "API"]);
+});
+
+test("excerpt prefers description, falls back to body, strips HTML and caps length", () => {
+  assert.equal(normalizeNote({ key: "nabcdef", name: "T", description: "desc", body: "body" }).excerpt, "desc");
+  assert.equal(normalizeNote({ key: "nabcdef", name: "T", body: "<p>a<br>b</p>" }).excerpt, "a b");
+  assert.equal(normalizeNote({ key: "nabcdef", name: "T", body: "" }).excerpt, null);
+  const long = normalizeNote({ key: "nabcdef", name: "T", body: "あ".repeat(300) }).excerpt!;
+  assert.equal([...long].length, 201);
+  assert.ok(long.endsWith("…"));
+});
+
+test("normalizeNotes drops unreadable rows and reports them", () => {
+  const r = normalizeNotes([{ key: "nabcdef", name: "ok" }, { name: "no key" }, { key: "nzzzzzz" }, null], 40);
+  assert.equal(r.items.length, 1);
+  assert.deepEqual(
+    r.skipped.map((s) => s.index),
+    [41, 42, 43],
+  );
+  assert.deepEqual(normalizeNotes({ not: "an array" }).skipped, [{ index: 0, reason: "list is not an array" }]);
+  assert.deepEqual(normalizeNotes(undefined), { items: [], skipped: [] });
 });
