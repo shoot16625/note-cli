@@ -1,7 +1,7 @@
 {
   "name": "note-cli",
-  "version": "0.1.0",
-  "description": "Draft, search and analyze note.com articles from AI coding agents via a bundled unofficial-API CLI",
+  "version": "0.2.0",
+  "description": "Write, publish, research and engage on note.com from AI coding agents via a bundled unofficial-API CLI",
   "author": {
     "name": "uchidash"
   },
@@ -10,7 +10,7 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "note-cli",
-    "shortDescription": "Draft, search and analyze note.com articles",
+    "shortDescription": "Write, publish and research note.com articles",
     "developerName": "uchidash",
     "capabilities": ["Read", "Write"],
     "websiteURL": "https://github.com/shoot16625/note-cli"

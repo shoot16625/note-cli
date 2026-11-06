@@ -8,6 +8,11 @@ export interface ParsedArticle {
   frontmatter: Record<string, string>;
 }
 
+export interface ConvertOptions {
+  /** Markdown image src -> uploaded image URL. Images found here become `<figure>` blocks. */
+  images?: ReadonlyMap<string, string>;
+}
+
 export interface ConvertResult {
   html: string;
   /** Visible text length (tags stripped) — note.com expects this as body_length. */
@@ -44,14 +49,37 @@ export function parseArticle(source: string): ParsedArticle {
  * Convert Markdown to the HTML dialect the note.com editor stores.
  * - note only has two heading levels: #/## -> h2, ### -> h3, deeper -> bold paragraph
  * - block elements get `name`/`id` UUID attributes like the editor produces
- * - things note can't represent (images, tables) are degraded with a warning
+ * - images listed in `opts.images` become `<figure>` blocks; other images and tables are degraded with a warning
  */
-export function markdownToNoteHtml(markdown: string): ConvertResult {
+export function markdownToNoteHtml(markdown: string, opts: ConvertOptions = {}): ConvertResult {
   const warnings: string[] = [];
+  const images = opts.images ?? new Map<string, string>();
   const marked = new Marked({ gfm: true, breaks: true });
+  const uploaded = (t: Tokens.Generic) => t.type === "image" && images.has((t as Tokens.Image).href);
 
   marked.use({
     renderer: {
+      paragraph(this: any, token: Tokens.Paragraph) {
+        // note has no inline images: lift uploaded images out of the paragraph into their own <figure> blocks.
+        if (!token.tokens.some(uploaded)) return `<p>${this.parser.parseInline(token.tokens)}</p>\n`;
+        let out = "";
+        let run: Tokens.Generic[] = [];
+        const flush = () => {
+          const inner = this.parser.parseInline(run).replace(/^(\s|<br>)+|(\s|<br>)+$/g, "");
+          if (inner) out += `<p>${inner}</p>\n`;
+          run = [];
+        };
+        for (const t of token.tokens) {
+          if (uploaded(t)) {
+            flush();
+            out += figure(images.get((t as Tokens.Image).href)!, t as Tokens.Image);
+          } else {
+            run.push(t);
+          }
+        }
+        flush();
+        return out;
+      },
       heading(this: any, token: Tokens.Heading) {
         const inner = this.parser.parseInline(token.tokens);
         if (token.depth <= 2) return `<h2>${inner}</h2>\n`;
@@ -68,10 +96,17 @@ export function markdownToNoteHtml(markdown: string): ConvertResult {
         return `<a href="${escapeAttr(href)}">${inner}</a>`;
       },
       image(token: Tokens.Image) {
+        // Reached only for images that were not uploaded (uploaded ones are handled in paragraph()).
+        if (images.has(token.href)) {
+          warnings.push(`Image "${token.href}" is inside a list item; note may not show it there. Put images on their own line.`);
+          return figure(images.get(token.href)!, token);
+        }
         const label = escapeHtml(token.text || token.href);
         const href = safeHref(token.href);
         warnings.push(
-          `Image "${token.href}" was not uploaded (image upload is not supported yet); ${href ? "replaced with a link" : "replaced with its alt text"}. Add it in the note editor.`,
+          href
+            ? `Image "${token.href}" is a remote URL and was not uploaded; replaced with a link. Save it locally and reference the file to embed it.`
+            : `Image "${token.href}" was not uploaded; replaced with its alt text.`,
         );
         return href ? `<a href="${escapeAttr(href)}">${label}</a>` : label;
       },
@@ -83,6 +118,8 @@ export function markdownToNoteHtml(markdown: string): ConvertResult {
         return `<pre><code>${escapeHtml(rows.join("\n"))}</code></pre>\n`;
       },
       html(token: Tokens.HTML | Tokens.Tag) {
+        // `<!-- paywall -->` marks where the paid part of an article starts.
+        if (PAYWALL_MARKER.test(token.raw.trim())) return `${PAYWALL_LINE}\n`;
         warnings.push("Raw HTML in Markdown was escaped.");
         return escapeHtml(token.raw);
       },
@@ -98,6 +135,26 @@ export function markdownToNoteHtml(markdown: string): ConvertResult {
     .trim();
   if (!html) html = "<p></p>";
   return { html, bodyLength: visibleTextLength(html), warnings: [...new Set(warnings)] };
+}
+
+const PAYWALL_MARKER = /^<!--\s*paywall\s*-->$/i;
+/** How note's editor stores the paid-part divider inside a draft body. */
+export const PAYWALL_LINE = "<paywall-line></paywall-line>";
+
+/** The block note's editor produces for an image; the optional Markdown title becomes the caption. */
+function figure(src: string, token: Tokens.Image): string {
+  const caption = token.title ? `<figcaption>${escapeHtml(token.title)}</figcaption>` : "";
+  return `<figure><img src="${escapeAttr(src)}" alt="${escapeAttr(token.text ?? "")}" width="620" height="auto">${caption}</figure>\n`;
+}
+
+/** Every image src in the Markdown, in order, without duplicates. */
+export function imageRefs(markdown: string): string[] {
+  const refs = new Set<string>();
+  const m = new Marked({ gfm: true, breaks: true });
+  m.walkTokens(m.lexer(markdown), (t) => {
+    if (t.type === "image") refs.add((t as Tokens.Image).href);
+  });
+  return [...refs];
 }
 
 const BLOCK_TAGS = new Set(["p", "h2", "h3", "ul", "ol", "li", "blockquote", "pre", "figure", "hr"]);
@@ -130,6 +187,7 @@ function stripDangerous(html: string): string {
 
 export function visibleTextLength(html: string): number {
   const text = html
+    .replace(/<paywall-line[^>]*>\s*<\/paywall-line>/gi, "")
     .replace(/<br\s*\/?>/gi, "")
     .replace(/<[^>]+>/g, "")
     .replace(/&(lt|gt|amp|quot|#0?39|nbsp);/g, "x");
@@ -139,6 +197,12 @@ export function visibleTextLength(html: string): number {
 /** Rough HTML -> plain text, used for reading drafts/articles back. */
 export function htmlToText(html: string): string {
   return html
+    .replace(/<img\b[^>]*>/gi, (tag) => {
+      const attr = (name: string) => tag.match(new RegExp(`\\s${name}="([^"]*)"`, "i"))?.[1] ?? "";
+      return `\n![${attr("alt")}](${attr("src")})\n`;
+    })
+    .replace(/<figcaption[^>]*>/gi, "")
+    .replace(/<paywall-line[^>]*>\s*<\/paywall-line>/gi, "\n----- paywall -----\n")
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/(p|h[1-6]|li|blockquote|pre|figure)>/gi, "\n")
     .replace(/<h2[^>]*>/gi, "## ")

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
-import { htmlToText, markdownToNoteHtml, parseArticle, safeHref, visibleTextLength } from "../src/markdown.ts";
+import { htmlToText, imageRefs, markdownToNoteHtml, parseArticle, safeHref, visibleTextLength } from "../src/markdown.ts";
 
 test("parseArticle prefers frontmatter title and strips frontmatter", () => {
   const a = parseArticle("---\ntitle: \"FM Title\"\ntags: x\n---\n# H1 Title\n\nbody");
@@ -79,4 +79,26 @@ test("unsafe links keep their text but lose the href", () => {
   assert.doesNotMatch(r.html, /javascript|data:/i);
   assert.match(r.html, /click and data and <a href="https:\/\/x.com">ok<\/a>/);
   assert.equal(r.warnings.length, 2);
+});
+
+test("uploaded images become figure blocks lifted out of their paragraph", () => {
+  const images = new Map([["a.png", "https://assets.st-note.com/img/1.png"]]);
+  const r = markdownToNoteHtml('before ![cat & dog](a.png "Cap") after\n\n![x](https://x.com/r.png)', { images });
+  const blocks = r.html.match(/<(p|figure) [^>]*>/g)!.map((t) => t.slice(1, t.indexOf(" ")));
+  assert.deepEqual(blocks, ["p", "figure", "p", "p"]);
+  assert.match(
+    r.html,
+    /<figure name="[^"]+" id="[^"]+"><img src="https:\/\/assets.st-note.com\/img\/1.png" alt="cat &amp; dog" width="620" height="auto"><figcaption>Cap<\/figcaption><\/figure>/,
+  );
+  assert.equal(r.warnings.length, 1);
+  assert.match(r.warnings[0], /remote URL/);
+});
+
+test("imageRefs lists each image src once, including nested ones", () => {
+  assert.deepEqual(imageRefs("![a](x.png)\n\n- ![b](y.png)\n\n> ![c](x.png)"), ["x.png", "y.png"]);
+});
+
+test("htmlToText keeps images as Markdown", () => {
+  const t = htmlToText('<p>Hi</p><figure><img src="https://x/1.png" alt="a" width="620"><figcaption>Cap</figcaption></figure>');
+  assert.equal(t, "Hi\n\n![a](https://x/1.png)\nCap");
 });

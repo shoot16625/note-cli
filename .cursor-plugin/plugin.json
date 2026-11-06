@@ -1,8 +1,8 @@
 {
   "name": "note-cli",
   "displayName": "note-cli",
-  "version": "0.1.0",
-  "description": "Draft, search and analyze note.com articles from AI coding agents via a bundled unofficial-API CLI",
+  "version": "0.2.0",
+  "description": "Write, publish, research and engage on note.com from AI coding agents via a bundled unofficial-API CLI",
   "author": {
     "name": "uchidash"
   },

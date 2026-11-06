@@ -1,6 +1,6 @@
 ---
 name: research
-description: Search note.com articles and analyze what performs well (likes, pricing, title patterns, posting time, top authors) with the bundled note-cli. Use for note market/competitor research, finding popular articles on a topic or hashtag, studying a creator, or reading an article's text.
+description: Search note.com articles, creators, magazines and hashtags and analyze what performs well (likes, pricing, title patterns, posting time, top authors) with the bundled note-cli. Use for note market/competitor research, finding popular articles on a topic, hashtag or category, choosing hashtags, studying a creator or magazine, checking contests, or reading an article's text, likes and comments.
 ---
 
 # note-cli:research
@@ -26,9 +26,16 @@ Output is JSON on stdout. Errors are JSON on stderr (`{"error": {"code", "messag
 
 ```bash
 note-cli search "<query>" --sort popular|hot|new --limit 20     # articles by keyword
-note-cli hashtag <tag> --order popular|hot|new --limit 50 [--paid-only]
+note-cli search "<query>" --type user|magazine|hashtag          # creators / magazines / hashtags (with article counts)
+note-cli hashtag <tag> --order popular|hot|new --limit 50 [--paid-only]   # + articleCount and relatedHashtags
 note-cli user <urlname> --limit 20                              # profile + recent articles
 note-cli note <key|url> [--max-chars N]                         # article text, cut at 20000 chars by default (paid parts are hidden)
+note-cli likes <key|url> --limit 50                             # who liked it (urlname, followerCount, likedAt)
+note-cli comments <key|url> --limit 50                          # top-level comments: text, likeCount, replyCount, creatorReplied
+note-cli magazine <key|url> --limit 20                          # magazine info (noteCount, price) + its articles
+note-cli categories                                             # category slugs (featured, tech, column, ...)
+note-cli category <slug> --sort new|trend --limit 20            # articles in a category; `featured` = editorial pick
+note-cli contests [--state opened] [--type contest|theme|all]   # running contests / themed hashtags, closing soonest first
 
 note-cli analyze search "<query>" --limit 100 --top 10
 note-cli analyze hashtag <tag> --limit 100
@@ -38,6 +45,8 @@ note-cli analyze user <urlname> --limit 100
 Each article is returned as `{key, title, url, author, likeCount, commentCount, price, isPaid, publishAt, hashtags, excerpt, imageCount}`.
 
 - `hashtags` are filled by `user` listings and `note`; search and hashtag listings don't include them.
+- To pick hashtags for an article, compare `search "<topic>" --type hashtag` counts and `hashtag <tag>` `relatedHashtags`; `contests` shows themes that are currently promoted.
+- `likes` lists the people who liked an article (useful for finding an author's audience); `comments` lists top-level comments only, with replies counted in `replyCount`.
 - `excerpt` (≤ 200 chars) comes from `hashtag`, `user` and `note`; search results have none. Use `note <key>` to read one in full.
 - `note` reports `bodyChars` and `truncated`; raise `--max-chars` (0 = no limit) only when you really need the whole text.
 - List outputs include `exhausted` (no more results exist) and, when the API returned rows note-cli could not read, `skipped` with reasons. Mention `skipped` to the user: it usually means note changed its API.

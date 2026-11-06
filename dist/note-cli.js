@@ -2,7 +2,8 @@
 // @bun
 
 // src/cli.ts
-import { readFile as readFile3 } from "fs/promises";
+import { readFile as readFile4 } from "fs/promises";
+import { dirname as dirname2, resolve as resolve2 } from "path";
 import { parseArgs } from "util";
 
 // src/analyze.ts
@@ -242,6 +243,8 @@ class NoteClient {
     if (opts.json !== undefined) {
       headers["Content-Type"] = "application/json";
       body = JSON.stringify(opts.json);
+    } else if (opts.form) {
+      body = opts.form;
     }
     await this.throttle();
     if (process.env.NOTE_CLI_DEBUG)
@@ -260,16 +263,38 @@ class NoteClient {
       } catch {}
     }
     if (!res.ok) {
-      const code = res.status === 401 || res.status === 403 ? "AUTH_ERROR" : res.status === 404 ? "NOT_FOUND" : res.status === 429 ? "RATE_LIMITED" : "API_ERROR";
+      const apiMessage = errorMessage(data);
+      const code = res.status === 401 || res.status === 403 && !apiMessage ? "AUTH_ERROR" : res.status === 403 ? "FORBIDDEN" : res.status === 404 ? "NOT_FOUND" : res.status === 429 ? "RATE_LIMITED" : "API_ERROR";
       const hint = code === "AUTH_ERROR" ? " Session may be expired; run `note-cli auth login` again." : "";
-      const apiMessage = data?.error?.message;
-      const suffix = typeof apiMessage === "string" ? ` ${apiMessage}` : "";
+      const suffix = apiMessage ? ` ${apiMessage}` : "";
       throw new CliError(code, `${method} ${url.pathname} -> HTTP ${res.status}.${suffix}${hint}`, {
         status: res.status,
         detail: typeof data === "string" ? data.slice(0, 500) : data
       });
     }
     return data;
+  }
+  async postForm(url, form) {
+    const target = new URL(url);
+    if (target.protocol !== "https:")
+      throw new CliError("API_ERROR", `Refusing to upload to a non-https URL: ${url}`);
+    await this.throttle();
+    if (process.env.NOTE_CLI_DEBUG)
+      console.error(`[note-cli] POST ${target.origin}${target.pathname}`);
+    let res;
+    try {
+      res = await this.fetchImpl(target, { method: "POST", body: form });
+    } catch (e) {
+      throw new CliError("NETWORK_ERROR", `Upload failed: ${e.message}`);
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new CliError("API_ERROR", `Image upload to storage failed: HTTP ${res.status}.`, {
+        status: res.status,
+        detail: text.slice(0, 500)
+      });
+    }
+    return res;
   }
   async throttle() {
     const wait = this.lastRequestAt + this.minIntervalMs - Date.now();
@@ -284,6 +309,13 @@ function safeDecode(v) {
   } catch {
     return v;
   }
+}
+function errorMessage(data) {
+  const d = data;
+  const raw = [d?.error?.message, d?.message, typeof d?.data === "string" ? d.data : null].find((m) => typeof m === "string" && m.trim());
+  if (!raw)
+    return null;
+  return raw.replace(/<br\s*\/?>/gi, " ").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 300);
 }
 
 // src/markdown.ts
@@ -1840,11 +1872,37 @@ function parseArticle(source) {
   }
   return { title, markdown: markdown.replace(/^\n+/, ""), frontmatter };
 }
-function markdownToNoteHtml(markdown) {
+function markdownToNoteHtml(markdown, opts = {}) {
   const warnings = [];
+  const images = opts.images ?? new Map;
   const marked = new Y({ gfm: true, breaks: true });
+  const uploaded = (t) => t.type === "image" && images.has(t.href);
   marked.use({
     renderer: {
+      paragraph(token) {
+        if (!token.tokens.some(uploaded))
+          return `<p>${this.parser.parseInline(token.tokens)}</p>
+`;
+        let out = "";
+        let run = [];
+        const flush = () => {
+          const inner = this.parser.parseInline(run).replace(/^(\s|<br>)+|(\s|<br>)+$/g, "");
+          if (inner)
+            out += `<p>${inner}</p>
+`;
+          run = [];
+        };
+        for (const t of token.tokens) {
+          if (uploaded(t)) {
+            flush();
+            out += figure(images.get(t.href), t);
+          } else {
+            run.push(t);
+          }
+        }
+        flush();
+        return out;
+      },
       heading(token) {
         const inner = this.parser.parseInline(token.tokens);
         if (token.depth <= 2)
@@ -1866,9 +1924,13 @@ function markdownToNoteHtml(markdown) {
         return `<a href="${escapeAttr(href)}">${inner}</a>`;
       },
       image(token) {
+        if (images.has(token.href)) {
+          warnings.push(`Image "${token.href}" is inside a list item; note may not show it there. Put images on their own line.`);
+          return figure(images.get(token.href), token);
+        }
         const label = escapeHtml(token.text || token.href);
         const href = safeHref(token.href);
-        warnings.push(`Image "${token.href}" was not uploaded (image upload is not supported yet); ${href ? "replaced with a link" : "replaced with its alt text"}. Add it in the note editor.`);
+        warnings.push(href ? `Image "${token.href}" is a remote URL and was not uploaded; replaced with a link. Save it locally and reference the file to embed it.` : `Image "${token.href}" was not uploaded; replaced with its alt text.`);
         return href ? `<a href="${escapeAttr(href)}">${label}</a>` : label;
       },
       table(token) {
@@ -1879,6 +1941,9 @@ function markdownToNoteHtml(markdown) {
 `;
       },
       html(token) {
+        if (PAYWALL_MARKER.test(token.raw.trim()))
+          return `${PAYWALL_LINE}
+`;
         warnings.push("Raw HTML in Markdown was escaped.");
         return escapeHtml(token.raw);
       }
@@ -1890,6 +1955,22 @@ function markdownToNoteHtml(markdown) {
   if (!html)
     html = "<p></p>";
   return { html, bodyLength: visibleTextLength(html), warnings: [...new Set(warnings)] };
+}
+var PAYWALL_MARKER = /^<!--\s*paywall\s*-->$/i;
+var PAYWALL_LINE = "<paywall-line></paywall-line>";
+function figure(src, token) {
+  const caption = token.title ? `<figcaption>${escapeHtml(token.title)}</figcaption>` : "";
+  return `<figure><img src="${escapeAttr(src)}" alt="${escapeAttr(token.text ?? "")}" width="620" height="auto">${caption}</figure>
+`;
+}
+function imageRefs(markdown) {
+  const refs = new Set;
+  const m = new Y({ gfm: true, breaks: true });
+  m.walkTokens(m.lexer(markdown), (t) => {
+    if (t.type === "image")
+      refs.add(t.href);
+  });
+  return [...refs];
 }
 var BLOCK_TAGS = new Set(["p", "h2", "h3", "ul", "ol", "li", "blockquote", "pre", "figure", "hr"]);
 function addBlockIds(html) {
@@ -1913,11 +1994,18 @@ function stripDangerous(html) {
   return html.replace(/<(script|iframe|object|embed|form|style)[^>]*>[\s\S]*?<\/\1>/gi, "").replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*')/gi, "");
 }
 function visibleTextLength(html) {
-  const text = html.replace(/<br\s*\/?>/gi, "").replace(/<[^>]+>/g, "").replace(/&(lt|gt|amp|quot|#0?39|nbsp);/g, "x");
+  const text = html.replace(/<paywall-line[^>]*>\s*<\/paywall-line>/gi, "").replace(/<br\s*\/?>/gi, "").replace(/<[^>]+>/g, "").replace(/&(lt|gt|amp|quot|#0?39|nbsp);/g, "x");
   return [...text].length;
 }
 function htmlToText(html) {
-  return html.replace(/<br\s*\/?>/gi, `
+  return html.replace(/<img\b[^>]*>/gi, (tag) => {
+    const attr = (name) => tag.match(new RegExp(`\\s${name}="([^"]*)"`, "i"))?.[1] ?? "";
+    return `
+![${attr("alt")}](${attr("src")})
+`;
+  }).replace(/<figcaption[^>]*>/gi, "").replace(/<paywall-line[^>]*>\s*<\/paywall-line>/gi, `
+----- paywall -----
+`).replace(/<br\s*\/?>/gi, `
 `).replace(/<\/(p|h[1-6]|li|blockquote|pre|figure)>/gi, `
 `).replace(/<h2[^>]*>/gi, "## ").replace(/<h3[^>]*>/gi, "### ").replace(/<li[^>]*>/gi, "- ").replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/\n{3,}/g, `
 
@@ -1991,13 +2079,16 @@ function tryNormalizeNote(raw) {
   };
 }
 function normalizeNotes(rows, offset = 0) {
+  return normalizeRows(rows, tryNormalizeNote, offset);
+}
+function normalizeRows(rows, normalize, offset = 0) {
   if (!Array.isArray(rows)) {
     return { items: [], skipped: rows === undefined || rows === null ? [] : [{ index: offset, reason: "list is not an array" }] };
   }
   const items = [];
   const skipped = [];
   rows.forEach((row, i) => {
-    const n = tryNormalizeNote(row);
+    const n = normalize(row);
     if (typeof n === "string")
       skipped.push({ index: offset + i, reason: n });
     else
@@ -2005,9 +2096,139 @@ function normalizeNotes(rows, offset = 0) {
   });
   return { items, skipped };
 }
+var str = (v) => typeof v === "string" && v ? v : null;
+function tryNormalizeUser(raw) {
+  if (!raw || typeof raw !== "object")
+    return "row is not an object";
+  const r = raw;
+  const urlname = str(r.urlname);
+  if (!urlname)
+    return "missing urlname";
+  const profile = str(r.profile);
+  return {
+    id: toNumber(r.id),
+    urlname,
+    nickname: str(pick(r, "nickname", "name")),
+    url: `https://note.com/${urlname}`,
+    profile: profile ? truncate(profile.replace(/\s+/g, " ").trim(), EXCERPT_MAX_CHARS) : null,
+    followerCount: toNumber(pick(r, "follower_count", "followerCount")),
+    followingCount: toNumber(pick(r, "following_count", "followingCount")),
+    isOfficial: typeof r.is_official === "boolean" ? r.is_official : null
+  };
+}
+function tryNormalizeMagazine(raw) {
+  if (!raw || typeof raw !== "object")
+    return "row is not an object";
+  const r = raw;
+  const key = str(r.key);
+  if (!key)
+    return "missing key";
+  const name = pick(r, "name");
+  if (typeof name !== "string")
+    return `missing name (key ${key})`;
+  const user = r.user ?? {};
+  const urlname = str(user.urlname);
+  const price = toNumber(r.price) ?? 0;
+  const description = str(r.description);
+  return {
+    id: toNumber(r.id),
+    key,
+    name,
+    url: str(pick(r, "magazine_url", "magazineUrl")) ?? (urlname ? `https://note.com/${urlname}/m/${key}` : `https://note.com/m/${key}`),
+    description: description ? truncate(description, EXCERPT_MAX_CHARS) : null,
+    author: { urlname, nickname: str(pick(user, "nickname", "name")) },
+    price,
+    isPaid: price > 0,
+    noteCount: toNumber(pick(r, "note_count", "noteCount")),
+    updatedAt: str(pick(r, "updated_at", "updatedAt"))
+  };
+}
+function tryNormalizeHashtag(raw) {
+  if (!raw || typeof raw !== "object")
+    return "row is not an object";
+  const r = raw;
+  const full = str(r.name);
+  if (!full)
+    return "missing name";
+  const name = full.replace(/^#/, "");
+  return { name, count: toNumber(r.count), url: `https://note.com/hashtag/${encodeURIComponent(name)}` };
+}
+function tryNormalizeLike(raw) {
+  if (!raw || typeof raw !== "object")
+    return "row is not an object";
+  const r = raw;
+  const user = r.user;
+  if (!user || typeof user !== "object")
+    return "missing user";
+  return {
+    likedAt: str(pick(r, "created_at", "createdAt")),
+    user: {
+      urlname: str(user.urlname),
+      nickname: str(pick(user, "nickname", "name")),
+      followerCount: toNumber(pick(user, "follower_count", "followerCount"))
+    }
+  };
+}
+function commentText(node) {
+  if (!node || typeof node !== "object")
+    return typeof node === "string" ? node : "";
+  if (node.type === "text")
+    return typeof node.value === "string" ? node.value : "";
+  const children = Array.isArray(node.children) ? node.children : [];
+  const inner = children.map(commentText).join("");
+  if (node.tag_name === "br")
+    return `
+`;
+  return node.tag_name === "p" ? `${inner}
+` : inner;
+}
+function tryNormalizeComment(raw) {
+  if (!raw || typeof raw !== "object")
+    return "row is not an object";
+  const r = raw;
+  const key = str(r.key);
+  if (!key)
+    return "missing key";
+  const user = r.user ?? {};
+  const text = typeof r.comment === "string" ? r.comment : commentText(r.comment);
+  return {
+    key,
+    text: text.trim(),
+    author: { urlname: str(user.urlname), nickname: str(pick(user, "nickname", "name")) },
+    likeCount: toNumber(pick(r, "like_count", "likeCount")) ?? 0,
+    replyCount: toNumber(pick(r, "reply_count", "replyCount")) ?? 0,
+    creatorReplied: typeof r.is_creator_replied === "boolean" ? r.is_creator_replied : null,
+    createdAt: str(pick(r, "created_at", "createdAt"))
+  };
+}
+function tryNormalizeContest(raw) {
+  if (!raw || typeof raw !== "object")
+    return "row is not an object";
+  const r = raw;
+  const name = str(r.name);
+  if (!name)
+    return "missing name";
+  const note = r.note && typeof r.note === "object" ? r.note : null;
+  const noteUrl = note ? str(pick(note, "noteUrl", "note_url")) ?? (str(note.key) && str(note.user?.urlname) ? `https://note.com/${note.user.urlname}/n/${note.key}` : null) : null;
+  return {
+    id: toNumber(r.id),
+    name,
+    type: str(r.type),
+    state: str(r.state),
+    hashtag: str(r.hashtag?.name)?.replace(/^#/, "") ?? null,
+    sponsor: str(r.sponsor),
+    openAt: str(r.openAt),
+    closeAt: str(r.closeAt)?.startsWith("2999") ? null : str(r.closeAt),
+    noteUrl
+  };
+}
+function truncate(s, max) {
+  const chars = [...s];
+  return chars.length > max ? `${chars.slice(0, max).join("")}\u2026` : s;
+}
 
 // src/api.ts
-async function paginate(limit, pageSize, fetchBatch, startOffset = 0) {
+async function paginate(limit, pageSize, fetchBatch, startOffset = 0, normalize = tryNormalizeNote) {
   const items = [];
   const skipped = [];
   let total = null;
@@ -2017,7 +2238,7 @@ async function paginate(limit, pageSize, fetchBatch, startOffset = 0) {
     const size = Math.min(pageSize, limit - items.length);
     const batch = await fetchBatch(offset, size, pageIndex);
     const rowCount = Array.isArray(batch.rows) ? batch.rows.length : 0;
-    const normalized = normalizeNotes(batch.rows, offset);
+    const normalized = normalizeRows(batch.rows, normalize, offset);
     items.push(...normalized.items);
     skipped.push(...normalized.skipped);
     total = batch.total ?? total;
@@ -2040,6 +2261,30 @@ async function searchNotes(client, q2, opts = {}) {
     const notes = res?.data?.notes ?? {};
     return { rows: notes.contents, total: num(notes.total_count), isLastPage: bool(notes.is_last_page) };
   }, opts.start ?? 0);
+}
+var SEARCH_NORMALIZERS = {
+  user: tryNormalizeUser,
+  magazine: tryNormalizeMagazine,
+  hashtag: tryNormalizeHashtag
+};
+async function searchOther(client, type, q2, opts = {}) {
+  const bucket = { user: "users", magazine: "magazines", hashtag: "hashtags" }[type];
+  return paginate(opts.limit ?? 20, 20, async (start, size) => {
+    const res = await client.request("/v3/searches", { auth: "optional", query: { context: type, q: q2, size, start } });
+    const list = res?.data?.[bucket] ?? {};
+    return { rows: list.contents, total: num(list.total_count), isLastPage: bool(list.is_last_page) };
+  }, opts.start ?? 0, SEARCH_NORMALIZERS[type]);
+}
+async function hashtagInfo(client, tag) {
+  const res = await client.request(`/v2/hashtags/${encodeURIComponent(tag)}`, { auth: "optional" });
+  const data = res?.data;
+  if (!data || typeof data !== "object")
+    return null;
+  return {
+    name: String(data.name ?? tag).replace(/^#/, ""),
+    count: num(data.count),
+    related: normalizeRows(data.relatedHashtags ?? data.related_hashtags, tryNormalizeHashtag).items
+  };
 }
 async function hashtagNotes(client, tag, opts = {}) {
   return paginate(opts.limit ?? 50, 50, async (_offset, _size, pageIndex) => {
@@ -2068,6 +2313,76 @@ async function getCreator(client, urlname) {
 async function getNote(client, key) {
   const res = await client.request(`/v3/notes/${encodeURIComponent(key)}`, { auth: "optional" });
   return res?.data;
+}
+async function noteLikes(client, key, opts = {}) {
+  return paginate(opts.limit ?? 50, 50, async (_offset, _size, pageIndex) => {
+    const res = await client.request(`/v3/notes/${encodeURIComponent(key)}/likes`, {
+      auth: "optional",
+      query: { page: pageIndex + 1 }
+    });
+    return {
+      rows: res?.data?.likes,
+      total: num(res?.data?.extra_fields?.like_count),
+      isLastPage: bool(res?.is_last_page ?? res?.data?.is_last_page) ?? false
+    };
+  }, 0, tryNormalizeLike);
+}
+async function noteComments(client, key, opts = {}) {
+  return paginate(opts.limit ?? 50, 20, async (_offset, _size, pageIndex) => {
+    const res = await client.request(`/v3/notes/${encodeURIComponent(key)}/note_comments`, {
+      auth: "optional",
+      query: { page: pageIndex + 1 }
+    });
+    return {
+      rows: res?.data,
+      total: num(res?.total_count),
+      isLastPage: res && "next_page" in res ? res.next_page === null : false
+    };
+  }, 0, tryNormalizeComment);
+}
+async function getMagazine(client, key) {
+  const res = await client.request(`/v1/magazines/${encodeURIComponent(key)}`, { auth: "optional" });
+  const m = tryNormalizeMagazine(res?.data);
+  if (typeof m === "string")
+    throw new CliError("API_ERROR", `Unexpected response for magazine ${key}: ${m}.`);
+  return m;
+}
+async function magazineNotes(client, key, opts = {}) {
+  return paginate(opts.limit ?? 20, 20, async (_offset, _size, pageIndex) => {
+    const res = await client.request(`/v1/layout/magazine/${encodeURIComponent(key)}/section`, {
+      auth: "optional",
+      query: { page: pageIndex + 1 }
+    });
+    const section = res?.data?.section ?? {};
+    return { rows: section.contents, total: null, isLastPage: bool(section.is_last_page) ?? false };
+  });
+}
+async function categories(client) {
+  const res = await client.request("/v2/categories", { auth: "optional" });
+  const list = res?.data?.categories;
+  if (!Array.isArray(list))
+    return [];
+  const out = [{ id: null, name: "\u6CE8\u76EE (featured)", slug: "featured" }];
+  for (const c2 of list) {
+    if (typeof c2?.engName === "string" && typeof c2?.endpoint === "string" && c2.endpoint.includes("/v1/categories/")) {
+      out.push({ id: num(c2.id), name: String(c2.name ?? c2.engName), slug: c2.engName });
+    }
+  }
+  return out;
+}
+async function categoryNotes(client, slug, opts = {}) {
+  return paginate(opts.limit ?? 20, 10, async (_offset, _size, pageIndex) => {
+    const res = slug === "featured" ? await client.request("/v3/notes/top_articles", { auth: "optional", query: { page: pageIndex + 1 } }) : await client.request(`/v1/categories/${encodeURIComponent(slug)}`, {
+      auth: "optional",
+      query: { note_intro_only: "true", sort: opts.sort ?? "new", page: pageIndex + 1 }
+    });
+    const data = res?.data ?? {};
+    return { rows: data.notes ?? data.articles, total: null, isLastPage: bool(data.last_page) ?? false };
+  });
+}
+async function contests(client) {
+  const res = await client.request("/v2/contests", { auth: "optional" });
+  return normalizeRows(res?.data?.contests, tryNormalizeContest);
 }
 async function currentUser(client) {
   const res = await client.request("/v2/current_user", { auth: "required" });
@@ -2142,8 +2457,131 @@ async function statsPv(client, opts = {}) {
   });
   return res?.data ?? res;
 }
+async function uploadImage(client, image) {
+  const presignForm = new FormData;
+  presignForm.append("filename", image.filename);
+  const res = await client.request("/v3/images/upload/presigned_post", {
+    method: "POST",
+    auth: "required",
+    editor: true,
+    form: presignForm
+  });
+  const data = res?.data ?? {};
+  const url = data.url;
+  const action = data.action;
+  const post = data.post;
+  if (typeof url !== "string" || typeof action !== "string" || !post || typeof post !== "object") {
+    throw new CliError("API_ERROR", "Image upload: presigned_post response was missing url/action/post.", { detail: res });
+  }
+  const s3Form = new FormData;
+  for (const [k, v] of Object.entries(post)) {
+    if (v !== null && v !== undefined && v !== "")
+      s3Form.append(k, String(v));
+  }
+  s3Form.append("file", new Blob([image.bytes], { type: image.mimeType }), image.filename);
+  await client.postForm(action, s3Form);
+  return { url };
+}
+async function setEyecatch(client, noteId, image) {
+  const form = new FormData;
+  form.append("note_id", String(noteId));
+  form.append("file", new Blob([image.bytes], { type: image.mimeType }), image.filename);
+  const res = await client.request("/v1/image_upload/note_eyecatch", {
+    method: "POST",
+    auth: "required",
+    editor: true,
+    form
+  });
+  if (res?.error) {
+    const message = typeof res.error.message === "string" ? res.error.message : JSON.stringify(res.error);
+    throw new CliError("API_ERROR", `Eyecatch was rejected: ${message}`, { detail: res });
+  }
+  const d = res?.data ?? res;
+  const url = d?.url ?? d?.eyecatch_url ?? d?.eyecatch ?? null;
+  return { url: typeof url === "string" ? url : null };
+}
+var write = (client, path, method, json) => client.request(path, { method, auth: "required", ...json !== undefined ? { json } : {} });
+async function likeNote(client, key, like) {
+  const res = await write(client, `/v3/notes/${encodeURIComponent(key)}/likes`, like ? "POST" : "DELETE", like ? {} : undefined);
+  return res?.data ?? res;
+}
+function commentAst(text) {
+  return {
+    type: "root",
+    children: text.split(/\n{2,}/).map((para) => ({
+      type: "element",
+      tag_name: "p",
+      children: [{ type: "text", value: para }]
+    }))
+  };
+}
+async function postComment(client, key, text, opts = {}) {
+  const res = await write(client, `/v3/notes/${encodeURIComponent(key)}/note_comments`, "POST", {
+    comment: commentAst(text),
+    ...opts.replyTo ? { parent_key: opts.replyTo } : {}
+  });
+  if (res?.error)
+    throw new CliError("API_ERROR", `Comment was rejected: ${res.error.message ?? JSON.stringify(res.error)}`, { detail: res });
+  const c2 = tryNormalizeComment(res?.data ?? res);
+  if (typeof c2 === "string")
+    throw new CliError("API_ERROR", `Comment was posted but the response was unexpected: ${c2}.`, { detail: res });
+  return c2;
+}
+async function deleteComment(client, key, commentKey) {
+  await write(client, `/v3/notes/${encodeURIComponent(key)}/note_comments/${encodeURIComponent(commentKey)}`, "DELETE");
+}
+async function followUser(client, userKey, follow) {
+  const res = await write(client, `/v3/users/${encodeURIComponent(userKey)}/following`, follow ? "POST" : "DELETE", follow ? {} : undefined);
+  return res?.data ?? res ?? null;
+}
+async function changeToDraft(client, key) {
+  const res = await write(client, `/v2/notes/${encodeURIComponent(key)}/change_status`, "POST", { status: "draft" });
+  if (res?.error)
+    throw new CliError("API_ERROR", `Could not change ${key} to a draft: ${res.error.message ?? JSON.stringify(res.error)}`, { detail: res });
+  return res?.data ?? res;
+}
+async function myMagazines(client, noteKey) {
+  const res = await client.request("/v1/my/magazines", { auth: "required", query: { note_key: noteKey } });
+  const list = res?.data?.magazines;
+  if (!Array.isArray(list))
+    return [];
+  return list.filter((m) => typeof m?.key === "string").map((m) => ({
+    id: num(m.id),
+    key: m.key,
+    name: String(m.name ?? ""),
+    status: typeof m.status === "string" ? m.status : null,
+    noteCount: num(m.note_count),
+    includesNote: bool(m.selected ?? m.is_added ?? m.included)
+  }));
+}
+async function addToMagazine(client, magazineKey, noteKey, add) {
+  const base = `/v1/our/magazines/${encodeURIComponent(magazineKey)}/notes`;
+  const res = add ? await write(client, base, "POST", { note_key: noteKey }) : await write(client, `${base}/${encodeURIComponent(noteKey)}`, "DELETE");
+  if (res?.error)
+    throw new CliError("API_ERROR", `Magazine update failed: ${res.error.message ?? JSON.stringify(res.error)}`, { detail: res });
+  return res?.data ?? res;
+}
+async function reservedNotes(client) {
+  const res = await client.request("/v3/notes/reserved", { auth: "required" });
+  return normalizeRows(res?.data, tryNormalizeNote);
+}
+async function noticeCounts(client) {
+  const res = await client.request("/v3/notice_counts", { auth: "required" });
+  const d = res?.data ?? {};
+  return { notices: num(d.unread_notice_count), infoNotices: num(d.unread_info_notice_count), messages: num(d.unread_dm_count) };
+}
+async function membershipPlans(client) {
+  const res = await client.request("/v2/circle/plans", { auth: "required" });
+  const plans = res?.data?.circlePlans ?? res?.data?.circle_plans;
+  return Array.isArray(plans) ? plans : [];
+}
+async function membershipSummaries(client) {
+  const res = await client.request("/v2/circle/memberships/summaries", { auth: "required" });
+  const d = res?.data ?? {};
+  return { total: num(d.totalCount ?? d.total_count), items: Array.isArray(d.summaries) ? d.summaries : [] };
+}
 
-// src/login.ts
+// src/browser.ts
 import { spawn } from "child_process";
 import { existsSync } from "fs";
 import { mkdtemp, readFile as readFile2, rm as rm2 } from "fs/promises";
@@ -2202,11 +2640,11 @@ class Cdp {
       ws.addEventListener("error", () => reject(new Error(`Cannot connect to ${url}`)), { once: true });
     });
   }
-  send(method, params = {}) {
+  send(method, params = {}, sessionId) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.ws.send(JSON.stringify({ id, method, params }));
+      this.ws.send(JSON.stringify({ id, method, params, ...sessionId ? { sessionId } : {} }));
     });
   }
   close() {
@@ -2230,19 +2668,35 @@ async function waitForDevToolsPort(profileDir, proc, timeoutMs = 20000) {
   }
   throw new CliError("BROWSER_LAUNCH_FAILED", "Timed out waiting for the browser's DevTools port.");
 }
-async function browserLogin(opts) {
+async function launchBrowser(opts) {
   const executable = findBrowser(opts.browser);
-  const profileDir = await mkdtemp(join2(tmpdir(), "note-cli-login-"));
-  const proc = spawn(executable, [
-    `--user-data-dir=${profileDir}`,
-    "--remote-debugging-port=0",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "https://note.com/login"
-  ], { stdio: "ignore" });
-  let cdp;
+  const profileDir = await mkdtemp(join2(tmpdir(), opts.prefix));
+  const proc = spawn(executable, [`--user-data-dir=${profileDir}`, "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", opts.url], { stdio: "ignore" });
+  const cleanup = async () => {
+    proc.kill();
+    await sleep(300);
+    await rm2(profileDir, { recursive: true, force: true }).catch(() => {});
+  };
   try {
-    cdp = await Cdp.connect(await waitForDevToolsPort(profileDir, proc));
+    const cdp = await Cdp.connect(await waitForDevToolsPort(profileDir, proc));
+    return {
+      cdp,
+      proc,
+      async close() {
+        cdp.close();
+        await cleanup();
+      }
+    };
+  } catch (e) {
+    await cleanup();
+    throw e;
+  }
+}
+
+// src/login.ts
+async function browserLogin(opts) {
+  const { cdp, proc, close } = await launchBrowser({ browser: opts.browser, url: "https://note.com/login", prefix: "note-cli-login-" });
+  try {
     console.error("Log in to note.com in the opened browser window. Waiting...");
     const deadline = Date.now() + opts.timeoutSec * 1000;
     while (Date.now() < deadline) {
@@ -2260,10 +2714,272 @@ async function browserLogin(opts) {
     }
     throw new CliError("LOGIN_TIMEOUT", `Login was not completed within ${opts.timeoutSec}s.`);
   } finally {
-    cdp?.close();
-    proc.kill();
-    await sleep(300);
-    await rm2(profileDir, { recursive: true, force: true }).catch(() => {});
+    await close();
+  }
+}
+
+// src/images.ts
+import { readFile as readFile3, stat } from "fs/promises";
+import { basename, isAbsolute, resolve } from "path";
+var MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+function sniffImageType(bytes) {
+  const b = bytes;
+  if (b.length >= 8 && b[0] === 137 && b[1] === 80 && b[2] === 78 && b[3] === 71)
+    return "image/png";
+  if (b.length >= 3 && b[0] === 255 && b[1] === 216 && b[2] === 255)
+    return "image/jpeg";
+  if (b.length >= 6 && b[0] === 71 && b[1] === 73 && b[2] === 70 && b[3] === 56)
+    return "image/gif";
+  if (b.length >= 12 && String.fromCharCode(b[0], b[1], b[2], b[3]) === "RIFF" && String.fromCharCode(b[8], b[9], b[10], b[11]) === "WEBP") {
+    return "image/webp";
+  }
+  return null;
+}
+function isLocalImageRef(src) {
+  const s = src.trim();
+  if (!s || s.startsWith("//"))
+    return false;
+  return !/^[a-z][a-z0-9+.-]*:/i.test(s) || /^file:\/\//i.test(s);
+}
+function resolveImagePath(src, baseDir) {
+  let s = src.trim();
+  if (/^file:\/\//i.test(s))
+    s = new URL(s).pathname;
+  try {
+    s = decodeURI(s);
+  } catch {}
+  return isAbsolute(s) ? s : resolve(baseDir, s);
+}
+async function readImage(path) {
+  const info = await stat(path).catch((e) => {
+    throw new CliError("INVALID_INPUT", `Cannot read image ${path}: ${e.message}`);
+  });
+  if (!info.isFile())
+    throw new CliError("INVALID_INPUT", `Not a file: ${path}`);
+  if (info.size > MAX_IMAGE_BYTES) {
+    throw new CliError("INVALID_INPUT", `Image ${path} is ${(info.size / 1024 / 1024).toFixed(1)} MB; note accepts up to 10 MB.`);
+  }
+  const bytes = new Uint8Array(await readFile3(path));
+  const mimeType = sniffImageType(bytes);
+  if (!mimeType)
+    throw new CliError("INVALID_INPUT", `Unsupported image type: ${path} (use PNG, JPEG, GIF or WebP).`);
+  return { path, filename: basename(path), mimeType, bytes };
+}
+var EYECATCH_RATIO = 1280 / 670;
+function imageSize(bytes) {
+  const type = sniffImageType(bytes);
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  try {
+    if (type === "image/png")
+      return { width: dv.getUint32(16), height: dv.getUint32(20) };
+    if (type === "image/gif")
+      return { width: dv.getUint16(6, true), height: dv.getUint16(8, true) };
+    if (type === "image/webp") {
+      const chunk = String.fromCharCode(bytes[12], bytes[13], bytes[14], bytes[15]);
+      if (chunk === "VP8X") {
+        const w2 = 1 + (bytes[24] | bytes[25] << 8 | bytes[26] << 16);
+        const h = 1 + (bytes[27] | bytes[28] << 8 | bytes[29] << 16);
+        return { width: w2, height: h };
+      }
+      if (chunk === "VP8 ")
+        return { width: dv.getUint16(26, true) & 16383, height: dv.getUint16(28, true) & 16383 };
+      if (chunk === "VP8L") {
+        const b = dv.getUint32(21, true);
+        return { width: (b & 16383) + 1, height: (b >> 14 & 16383) + 1 };
+      }
+      return null;
+    }
+    if (type === "image/jpeg") {
+      let i = 2;
+      while (i + 9 < bytes.length) {
+        if (bytes[i] !== 255)
+          return null;
+        const marker = bytes[i + 1];
+        const len = dv.getUint16(i + 2);
+        if (marker >= 192 && marker <= 207 && ![196, 200, 204].includes(marker)) {
+          return { width: dv.getUint16(i + 7), height: dv.getUint16(i + 5) };
+        }
+        i += 2 + len;
+      }
+    }
+  } catch {}
+  return null;
+}
+function eyecatchRatioWarning(image) {
+  const size = imageSize(image.bytes);
+  if (!size || !size.height)
+    return null;
+  const ratio = size.width / size.height;
+  if (Math.abs(ratio - EYECATCH_RATIO) / EYECATCH_RATIO <= 0.01)
+    return null;
+  return `Eyecatch ${image.filename} is ${size.width}x${size.height}; note requires a 1280:670 aspect ratio (e.g. 1280x670) and will likely reject it.`;
+}
+
+// src/publish.ts
+var VOID_TAGS = new Set(["br", "img", "hr", "input", "source", "wbr"]);
+function topLevelBlocks(html) {
+  const blocks = [];
+  const tag = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*?(\/?)>/g;
+  let depth = 0;
+  let start = 0;
+  let m;
+  while (m = tag.exec(html)) {
+    const [, closing, nameRaw, selfClosing] = m;
+    const name = nameRaw.toLowerCase();
+    if (closing)
+      depth--;
+    else if (!selfClosing && !VOID_TAGS.has(name))
+      depth++;
+    if (depth === 0) {
+      const block = html.slice(start, tag.lastIndex).trim();
+      if (block)
+        blocks.push(block);
+      start = tag.lastIndex;
+    }
+  }
+  const tail = html.slice(start).trim();
+  if (tail)
+    blocks.push(tail);
+  return blocks;
+}
+var isPaywall = (block) => /^<paywall-line\b/i.test(block);
+function imageKey(src) {
+  try {
+    const last = new URL(src).pathname.split("/").pop() ?? "";
+    return last.match(/[a-f0-9]{32}/)?.[0] ?? last.match(/[^.]+/)?.[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+function buildPublishPayload(note, s) {
+  const blocks = topLevelBlocks(note.body);
+  const paywallAt = blocks.findIndex(isPaywall);
+  const content = blocks.filter((b) => !isPaywall(b));
+  let separator = null;
+  if (paywallAt > 0) {
+    separator = blocks[paywallAt - 1].match(/\sname="([^"]+)"/)?.[1] ?? null;
+    if (!separator)
+      throw new CliError("INVALID_INPUT", "The block before the paywall line has no name attribute; re-save the draft with note-cli.");
+  }
+  if (s.price > 0 && !separator) {
+    throw new CliError("INVALID_INPUT", "A paid article needs a paywall: put `<!-- paywall -->` in the Markdown where the paid part starts (or place the line in the editor).");
+  }
+  const freeCount = separator && s.price > 0 ? paywallAt : content.length;
+  const imageKeys = content.flatMap((b) => [...b.matchAll(/<img\b[^>]*\ssrc="([^"]+)"/gi)].map((m) => imageKey(m[1]))).filter((k) => !!k);
+  const html = content.join("");
+  return {
+    author_ids: [],
+    body_length: visibleTextLength(html),
+    disable_comment: s.disableComments,
+    exclude_from_creator_top: false,
+    exclude_ai_learning_reward: false,
+    free_body: content.slice(0, freeCount).join(""),
+    pay_body: content.slice(freeCount).join(""),
+    hashtags: s.hashtags.map((h) => `#${h.replace(/^[#\uFF03]/, "")}`),
+    image_keys: imageKeys,
+    index: s.toc,
+    is_refund: s.price > 0 && s.refund,
+    limited: false,
+    magazine_ids: [],
+    magazine_keys: s.magazineKeys,
+    name: note.name,
+    price: s.price,
+    send_notifications_flag: s.notify,
+    separator: s.price > 0 ? separator : null,
+    ...note.slug ? { slug: note.slug } : {},
+    status: s.publishAt ? "reserved" : "published",
+    ...s.publishAt ? { publish_at: s.publishAt } : {},
+    discount_campaigns: []
+  };
+}
+var RECAPTCHA_SITE_KEY = "6LefXTAsAAAAADYVISEItAl0IX1rgSGQ-asNy56w";
+var PAGE_SCRIPT = `async ({ noteId, payload, xsrf, siteKey }) => {
+  const headers = { "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" };
+  if (xsrf) headers["X-XSRF-TOKEN"] = xsrf;
+  const api = async (path, init = {}) => {
+    const r = await fetch("https://note.com/api" + path, { credentials: "include", ...init, headers });
+    const text = await r.text();
+    let body = text;
+    try { body = JSON.parse(text); } catch {}
+    return { status: r.status, body };
+  };
+  const ch = await api("/v3/challenges?via=note_post");
+  const challenges = (ch.body && ch.body.data && ch.body.data.challenges) || [];
+  let verification = null;
+  if (challenges.includes("reCAPTCHAv3")) {
+    if (!window.grecaptcha || !window.grecaptcha.enterprise) {
+      await new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = "https://www.google.com/recaptcha/enterprise.js?render=" + encodeURIComponent(siteKey);
+        s.onload = resolve;
+        s.onerror = () => reject(new Error("could not load reCAPTCHA"));
+        document.head.appendChild(s);
+      });
+    }
+    const token = await new Promise((resolve, reject) =>
+      window.grecaptcha.enterprise.ready(() =>
+        window.grecaptcha.enterprise.execute(siteKey, { action: "note_post" }).then(resolve, reject)));
+    const v = await api("/v3/challenges/verifications", {
+      method: "POST",
+      body: JSON.stringify({ g_recaptcha_token_v3: token, g_recaptcha_action_v3: "note_post", via: "note_post" }),
+    });
+    verification = v.status;
+  }
+  const put = await api("/v1/text_notes/" + noteId, { method: "PUT", body: JSON.stringify(payload) });
+  return { challenges, verification, status: put.status, body: put.body };
+}`;
+async function publishInBrowser(opts) {
+  const { cdp, close } = await launchBrowser({ browser: opts.browser, url: "about:blank", prefix: "note-cli-publish-" });
+  try {
+    await cdp.send("Storage.setCookies", {
+      cookies: Object.entries(opts.cookies).map(([name, value]) => ({
+        name,
+        value,
+        domain: ".note.com",
+        path: "/",
+        secure: true,
+        httpOnly: name !== "XSRF-TOKEN",
+        sameSite: "Lax"
+      }))
+    });
+    const { targetInfos } = await cdp.send("Target.getTargets");
+    const page = targetInfos.find((t) => t.type === "page");
+    if (!page)
+      throw new CliError("BROWSER_LAUNCH_FAILED", "The browser opened no page.");
+    const { sessionId } = await cdp.send("Target.attachToTarget", { targetId: page.targetId, flatten: true });
+    await cdp.send("Page.navigate", { url: `https://editor.note.com/notes/${opts.noteKey}/publish/` }, sessionId);
+    const evaluate = async (expression, awaitPromise = false) => {
+      const r = await cdp.send("Runtime.evaluate", { expression, awaitPromise, returnByValue: true }, sessionId);
+      if (r.exceptionDetails) {
+        throw new CliError("PUBLISH_FAILED", `Browser script failed: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
+      }
+      return r.result?.value;
+    };
+    const deadline = Date.now() + opts.timeoutSec * 1000;
+    while (await evaluate("location.host + ' ' + document.readyState").catch(() => "") !== "editor.note.com complete") {
+      if (Date.now() > deadline)
+        throw new CliError("PUBLISH_FAILED", "Timed out loading the note editor in the browser.");
+      await sleep(500);
+    }
+    if (await evaluate("location.pathname.startsWith('/login') || location.host === 'note.com'")) {
+      throw new CliError("AUTH_ERROR", "The browser was not logged in; run `note-cli auth login` again.");
+    }
+    const args = JSON.stringify({
+      noteId: opts.noteId,
+      payload: opts.payload,
+      xsrf: opts.cookies["XSRF-TOKEN"] ? safeDecode2(opts.cookies["XSRF-TOKEN"]) : null,
+      siteKey: RECAPTCHA_SITE_KEY
+    });
+    return await evaluate(`(${PAGE_SCRIPT})(${args})`, true);
+  } finally {
+    await close();
+  }
+}
+function safeDecode2(v) {
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return v;
   }
 }
 
@@ -2298,6 +3014,28 @@ function hashtag(input) {
     throw new CliError("USAGE", `Not a valid hashtag: "${input}".`);
   }
   return name;
+}
+var MAGAZINE_KEY = /^m[0-9a-z]{6,32}$/;
+function magazineKey(input) {
+  const s = input.trim();
+  const fromUrl = s.match(/\/m\/(m[0-9a-z]{6,32})(?:[/?#]|$)/)?.[1];
+  const key = fromUrl ?? s;
+  if (!MAGAZINE_KEY.test(key)) {
+    throw new CliError("USAGE", `Not a magazine key or URL: "${input}". Expected something like m97e554a23b24.`);
+  }
+  return key;
+}
+function categorySlug(input) {
+  const s = input.trim().toLowerCase();
+  if (!/^[a-z][a-z0-9_-]{0,40}$/.test(s))
+    throw new CliError("USAGE", `Not a category slug: "${input}". Run \`note-cli categories\`.`);
+  return s;
+}
+function token(input, what) {
+  const s = input.trim();
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(s))
+    throw new CliError("USAGE", `Not a valid ${what}: "${input}".`);
+  return s;
 }
 
 // src/cli.ts
@@ -2359,31 +3097,42 @@ var COMMANDS = {
     }
   },
   "draft create": {
-    usage: "draft create <file.md|-> [--title <title>] [--dry-run]",
-    summary: "Create a new draft from Markdown (title: frontmatter `title:` or first `# H1`)",
-    options: { title: { type: "string" }, "dry-run": { type: "boolean" } },
+    usage: "draft create <file.md|-> [--title <title>] [--eyecatch <image>] [--dry-run]",
+    summary: "Create a new draft from Markdown; local images are uploaded (title: frontmatter `title:` or first `# H1`)",
+    options: { title: { type: "string" }, eyecatch: { type: "string" }, "dry-run": { type: "boolean" } },
     args: 1,
     async run({ values, positionals, client }) {
-      const article = await loadArticle(positionals[0], values.title);
+      const input = await readArticleInput(positionals[0], values);
       if (values["dry-run"])
-        return { dryRun: true, ...article };
+        return dryRunResult(input);
+      const article = await uploadAndConvert(client, input);
       const draft = await createDraft(client, article.title);
       await saveDraft(client, draft.id, article);
-      return { created: true, ...draft, title: article.title, bodyLength: article.bodyLength, warnings: article.warnings };
+      const eyecatch = await applyEyecatch(client, draft.id, input.eyecatch);
+      return {
+        created: true,
+        ...draft,
+        title: article.title,
+        bodyLength: article.bodyLength,
+        ...imagesField(article.images, eyecatch),
+        warnings: [...article.warnings, ...eyecatch.warnings]
+      };
     }
   },
   "draft update": {
-    usage: "draft update <id|key|url> <file.md|-> [--title <title>] [--dry-run]",
-    summary: "Overwrite an existing draft's title and body with Markdown",
-    options: { title: { type: "string" }, "dry-run": { type: "boolean" } },
+    usage: "draft update <id|key|url> <file.md|-> [--title <title>] [--eyecatch <image>] [--dry-run]",
+    summary: "Overwrite an existing draft's title and body with Markdown; local images are uploaded",
+    options: { title: { type: "string" }, eyecatch: { type: "string" }, "dry-run": { type: "boolean" } },
     args: 2,
     async run({ values, positionals, client }) {
       const ref = noteIdOrKey(positionals[0]);
-      const article = await loadArticle(positionals[1], values.title);
+      const input = await readArticleInput(positionals[1], values);
       if (values["dry-run"])
-        return { dryRun: true, ...article };
+        return dryRunResult(input);
       const { id, key } = await resolveNoteId(client, ref);
+      const article = await uploadAndConvert(client, input);
       await saveDraft(client, id, article);
+      const eyecatch = await applyEyecatch(client, id, input.eyecatch);
       return {
         updated: true,
         id,
@@ -2391,7 +3140,8 @@ var COMMANDS = {
         editUrl: key ? editUrl(key) : null,
         title: article.title,
         bodyLength: article.bodyLength,
-        warnings: article.warnings
+        ...imagesField(article.images, eyecatch),
+        warnings: [...article.warnings, ...eyecatch.warnings]
       };
     }
   },
@@ -2430,7 +3180,7 @@ var COMMANDS = {
   },
   "draft delete": {
     usage: "draft delete <id|key|url> --yes",
-    summary: "Delete a draft (drafts only; published articles are not affected)",
+    summary: "Delete a draft (drafts only; use `delete` for a published article)",
     options: { yes: { type: "boolean" } },
     args: 1,
     async run({ values, positionals, client }) {
@@ -2443,9 +3193,10 @@ var COMMANDS = {
     }
   },
   search: {
-    usage: "search <query> [--sort popular|hot|new] [--limit <n>] [--start <n>]",
-    summary: "Search articles by keyword",
+    usage: "search <query> [--type note|user|magazine|hashtag] [--sort popular|hot|new] [--limit <n>] [--start <n>]",
+    summary: "Search articles (default), creators, magazines or hashtags by keyword (--sort applies to articles only)",
     options: {
+      type: { type: "string", default: "note" },
       sort: { type: "string", default: "popular" },
       limit: { type: "string", default: "20" },
       start: { type: "string", default: "0" }
@@ -2453,6 +3204,15 @@ var COMMANDS = {
     args: 1,
     async run({ values, positionals, client }) {
       const q2 = positionals.join(" ");
+      const type = oneOf(values.type, ["note", "user", "magazine", "hashtag"], "type");
+      if (type !== "note") {
+        const res2 = await searchOther(client, type, q2, {
+          limit: int(values.limit, "limit"),
+          start: int(values.start, "start")
+        });
+        const field = { user: "users", magazine: "magazines", hashtag: "hashtags" }[type];
+        return { query: q2, type, total: res2.total, count: res2.items.length, exhausted: res2.exhausted, [field]: res2.items, ...skippedField(res2.skipped) };
+      }
       const res = await searchNotes(client, q2, {
         sort: oneOf(values.sort, SORTS, "sort"),
         limit: int(values.limit, "limit"),
@@ -2463,7 +3223,7 @@ var COMMANDS = {
   },
   hashtag: {
     usage: "hashtag <tag> [--order popular|hot|new] [--limit <n>] [--paid-only]",
-    summary: "List articles for a hashtag",
+    summary: "List articles for a hashtag, with its total article count and related hashtags",
     options: {
       order: { type: "string", default: "popular" },
       limit: { type: "string", default: "50" },
@@ -2472,12 +3232,27 @@ var COMMANDS = {
     args: 1,
     async run({ values, positionals, client }) {
       const tag = hashtag(positionals[0]);
+      const order = oneOf(values.order, SORTS, "order");
+      const info = await hashtagInfo(client, tag).catch((e) => {
+        if (e instanceof CliError && e.code !== "NOT_LOGGED_IN")
+          return null;
+        throw e;
+      });
       const res = await hashtagNotes(client, tag, {
-        order: oneOf(values.order, SORTS, "order"),
+        order,
         limit: int(values.limit, "limit"),
         paidOnly: Boolean(values["paid-only"])
       });
-      return { hashtag: tag, total: res.total, count: res.items.length, exhausted: res.exhausted, notes: res.items, ...skippedField(res.skipped) };
+      return {
+        hashtag: tag,
+        articleCount: info?.count ?? null,
+        relatedHashtags: info?.related ?? [],
+        total: res.total,
+        count: res.items.length,
+        exhausted: res.exhausted,
+        notes: res.items,
+        ...skippedField(res.skipped)
+      };
     }
   },
   user: {
@@ -2526,6 +3301,76 @@ var COMMANDS = {
         canRead: data.can_read ?? data.canRead ?? null,
         ...bodyField(body, Boolean(values.html), maxChars)
       };
+    }
+  },
+  likes: {
+    usage: "likes <key|url> [--limit <n>]",
+    summary: "List who liked an article (newest first)",
+    options: { limit: { type: "string", default: "50" } },
+    args: 1,
+    async run({ values, positionals, client }) {
+      const key = noteKey(positionals[0]);
+      const res = await noteLikes(client, key, { limit: int(values.limit, "limit") });
+      return { key, total: res.total, count: res.items.length, exhausted: res.exhausted, likes: res.items, ...skippedField(res.skipped) };
+    }
+  },
+  comments: {
+    usage: "comments <key|url> [--limit <n>]",
+    summary: "Read an article's comments (top-level; replies are counted in replyCount)",
+    options: { limit: { type: "string", default: "50" } },
+    args: 1,
+    async run({ values, positionals, client }) {
+      const key = noteKey(positionals[0]);
+      const res = await noteComments(client, key, { limit: int(values.limit, "limit") });
+      return { key, total: res.total, count: res.items.length, exhausted: res.exhausted, comments: res.items, ...skippedField(res.skipped) };
+    }
+  },
+  magazine: {
+    usage: "magazine <key|url> [--limit <n>]",
+    summary: "Show a magazine and its articles (in the magazine's order)",
+    options: { limit: { type: "string", default: "20" } },
+    args: 1,
+    async run({ values, positionals, client }) {
+      const key = magazineKey(positionals[0]);
+      const magazine = await getMagazine(client, key);
+      const res = await magazineNotes(client, key, { limit: int(values.limit, "limit") });
+      return { magazine, count: res.items.length, exhausted: res.exhausted, notes: res.items, ...skippedField(res.skipped) };
+    }
+  },
+  categories: {
+    usage: "categories",
+    summary: "List note's article categories (use the slug with `category`)",
+    async run({ client }) {
+      return { categories: await categories(client) };
+    }
+  },
+  category: {
+    usage: "category <slug> [--sort new|trend] [--limit <n>]",
+    summary: "List articles in a category; `featured` is note's editorial pick (sort does not apply)",
+    options: { sort: { type: "string", default: "new" }, limit: { type: "string", default: "20" } },
+    args: 1,
+    async run({ values, positionals, client }) {
+      const slug = categorySlug(positionals[0]);
+      const sort = oneOf(values.sort, ["new", "trend"], "sort");
+      const res = await categoryNotes(client, slug, { sort, limit: int(values.limit, "limit") });
+      return { category: slug, sort: slug === "featured" ? null : sort, count: res.items.length, exhausted: res.exhausted, notes: res.items, ...skippedField(res.skipped) };
+    }
+  },
+  contests: {
+    usage: "contests [--state opened|closed|finished|all] [--type contest|theme|all] [--limit <n>]",
+    summary: "List note's contests and themed hashtags (closing soonest first)",
+    options: {
+      state: { type: "string", default: "opened" },
+      type: { type: "string", default: "all" },
+      limit: { type: "string", default: "50" }
+    },
+    async run({ values, client }) {
+      const state = oneOf(values.state, ["opened", "closed", "finished", "all"], "state");
+      const type = oneOf(values.type, ["contest", "theme", "all"], "type");
+      const limit = int(values.limit, "limit");
+      const res = await contests(client);
+      const items = res.items.filter((c2) => state === "all" || c2.state === state).filter((c2) => type === "all" || type === "theme" === (c2.type === "theme")).sort((a3, b) => (a3.closeAt ?? "9999").localeCompare(b.closeAt ?? "9999"));
+      return { state, type, total: items.length, count: Math.min(items.length, limit), contests: items.slice(0, limit), ...skippedField(res.skipped) };
     }
   },
   "analyze search": {
@@ -2590,6 +3435,249 @@ var COMMANDS = {
         page: int(values.page, "page")
       });
     }
+  },
+  publish: {
+    usage: "publish <key|url> [file.md|-] --yes [--hashtag <tag>]... [--price <yen>] [--magazine <key>]... [--schedule <time>] [--toc] [--disable-comments] [--refund] [--no-notify] [--title <t>] [--eyecatch <image>] [--dry-run] [--browser <path>] [--timeout <sec>]",
+    summary: "Publish a draft (or re-publish an article), optionally saving a Markdown file to it first. A browser window opens briefly to pass note's reCAPTCHA",
+    options: {
+      yes: { type: "boolean" },
+      hashtag: { type: "string", multiple: true },
+      price: { type: "string", default: "0" },
+      magazine: { type: "string", multiple: true },
+      schedule: { type: "string" },
+      toc: { type: "boolean" },
+      "disable-comments": { type: "boolean" },
+      refund: { type: "boolean" },
+      "no-notify": { type: "boolean" },
+      title: { type: "string" },
+      eyecatch: { type: "string" },
+      "dry-run": { type: "boolean" },
+      browser: { type: "string" },
+      timeout: { type: "string", default: "120" }
+    },
+    args: 1,
+    async run({ values, positionals, client, deps }) {
+      const key = noteKey(positionals[0]);
+      const settings = publishSettings(values);
+      const timeoutSec = int(values.timeout, "timeout");
+      const input = positionals[1] ? await readArticleInput(positionals[1], values) : null;
+      if (values["dry-run"]) {
+        const note2 = input ? { name: input.title, body: dryRunResult(input).html, slug: null } : await savedNote(client, key);
+        return { dryRun: true, key, ...publishPreview(buildPublishPayload(note2, settings)) };
+      }
+      if (!values.yes) {
+        throw new CliError("CONFIRMATION_REQUIRED", "Publishing makes the article public. Pass --yes to publish (try --dry-run first).");
+      }
+      const session = await client.getSession();
+      if (!session?.cookies._note_session_v5) {
+        throw new CliError("NOT_LOGGED_IN", "Not logged in. Run `note-cli auth login` (or `note-cli auth import`).");
+      }
+      const current = await getDraft(client, key);
+      if (!current?.id)
+        throw new CliError("NOT_FOUND", `Could not find your article ${key}.`);
+      const id = Number(current.id);
+      let note = noteFromDraft(current);
+      const extra = {};
+      const warnings = [];
+      if (input) {
+        const article = await uploadAndConvert(client, input);
+        await saveDraft(client, id, article);
+        const eyecatch = await applyEyecatch(client, id, input.eyecatch);
+        note = { name: article.title, body: article.html, slug: note.slug };
+        Object.assign(extra, imagesField(article.images, eyecatch));
+        warnings.push(...article.warnings, ...eyecatch.warnings);
+      }
+      const payload = buildPublishPayload(note, settings);
+      const res = await (deps.publish ?? publishInBrowser)({
+        cookies: session.cookies,
+        noteId: id,
+        noteKey: key,
+        payload,
+        browser: typeof values.browser === "string" ? values.browser : undefined,
+        timeoutSec
+      });
+      if (res.status < 200 || res.status >= 300)
+        throw publishError(res, settings);
+      const urlname2 = session.urlname ?? current.user?.urlname;
+      return {
+        [settings.publishAt ? "scheduled" : "published"]: true,
+        id,
+        key,
+        title: note.name,
+        url: res.body?.data?.note_url ?? (urlname2 ? `https://note.com/${urlname2}/n/${key}` : null),
+        ...settings.publishAt ? { publishAt: settings.publishAt } : {},
+        price: settings.price,
+        hashtags: settings.hashtags,
+        ...extra,
+        warnings
+      };
+    }
+  },
+  unpublish: {
+    usage: "unpublish <key|url> --yes",
+    summary: "Turn a published (or scheduled) article back into a draft; paid or sold articles cannot be",
+    options: { yes: { type: "boolean" } },
+    args: 1,
+    async run({ values, positionals, client }) {
+      const key = noteKey(positionals[0]);
+      if (!values.yes)
+        throw new CliError("CONFIRMATION_REQUIRED", "Pass --yes to take the article down (it becomes a draft).");
+      await changeToDraft(client, key);
+      return { unpublished: true, key, status: "draft" };
+    }
+  },
+  delete: {
+    usage: "delete <key|url> --yes",
+    summary: "Delete one of your articles for good; a published one is turned back into a draft first",
+    options: { yes: { type: "boolean" } },
+    args: 1,
+    async run({ values, positionals, client }) {
+      const key = noteKey(positionals[0]);
+      if (!values.yes)
+        throw new CliError("CONFIRMATION_REQUIRED", "Pass --yes to delete the article. This cannot be undone.");
+      const data = await getDraft(client, key);
+      if (!data?.id)
+        throw new CliError("NOT_FOUND", `Could not find your article ${key}.`);
+      const id = Number(data.id);
+      const wasStatus = typeof data.status === "string" ? data.status : null;
+      if (wasStatus && wasStatus !== "draft")
+        await changeToDraft(client, key);
+      await deleteDraft(client, id);
+      return { deleted: true, id, key, wasStatus };
+    }
+  },
+  reserved: {
+    usage: "reserved",
+    summary: "List your scheduled articles",
+    async run({ client }) {
+      const res = await reservedNotes(client);
+      return { count: res.items.length, notes: res.items, ...skippedField(res.skipped) };
+    }
+  },
+  like: {
+    usage: "like <key|url>",
+    summary: "Like (\u30B9\u30AD) an article",
+    args: 1,
+    async run({ positionals, client }) {
+      const key = noteKey(positionals[0]);
+      await likeNote(client, key, true);
+      return { liked: true, key };
+    }
+  },
+  unlike: {
+    usage: "unlike <key|url>",
+    summary: "Remove your like from an article",
+    args: 1,
+    async run({ positionals, client }) {
+      const key = noteKey(positionals[0]);
+      await likeNote(client, key, false);
+      return { liked: false, key };
+    }
+  },
+  comment: {
+    usage: "comment <key|url> <text|-> [--reply-to <commentKey>]",
+    summary: "Post a comment (or a reply) on an article; `-` reads the text from stdin",
+    options: { "reply-to": { type: "string" } },
+    args: 2,
+    async run({ values, positionals, client }) {
+      const key = noteKey(positionals[0]);
+      const text = (positionals[1] === "-" && positionals.length === 2 ? await readStdin() : positionals.slice(1).join(" ")).trim();
+      if (!text)
+        throw new CliError("INVALID_INPUT", "The comment is empty.");
+      const replyTo = typeof values["reply-to"] === "string" ? token(values["reply-to"], "comment key") : undefined;
+      try {
+        return { posted: true, key, comment: await postComment(client, key, text, { replyTo }) };
+      } catch (e) {
+        if (e instanceof CliError && e.detail?.error?.type === "comment_acknowledgement") {
+          throw new CliError("COMMENT_GUIDELINES", "note asks you to accept its comment guidelines once: open any article in a browser, start a comment, and accept the guidelines. Then retry.", { status: e.status, detail: e.detail });
+        }
+        throw e;
+      }
+    }
+  },
+  "comment delete": {
+    usage: "comment delete <key|url> <commentKey> --yes",
+    summary: "Delete a comment (your own, or any comment on your article)",
+    options: { yes: { type: "boolean" } },
+    args: 2,
+    async run({ values, positionals, client }) {
+      const key = noteKey(positionals[0]);
+      const commentKey = token(positionals[1], "comment key");
+      if (!values.yes)
+        throw new CliError("CONFIRMATION_REQUIRED", "Pass --yes to delete the comment.");
+      await deleteComment(client, key, commentKey);
+      return { deleted: true, key, commentKey };
+    }
+  },
+  follow: {
+    usage: "follow <urlname>",
+    summary: "Follow a creator",
+    args: 1,
+    async run({ positionals, client }) {
+      return follow(client, urlname(positionals[0]), true);
+    }
+  },
+  unfollow: {
+    usage: "unfollow <urlname>",
+    summary: "Unfollow a creator",
+    args: 1,
+    async run({ positionals, client }) {
+      return follow(client, urlname(positionals[0]), false);
+    }
+  },
+  magazines: {
+    usage: "magazines [--note <key|url>]",
+    summary: "List your own magazines (with --note: whether that article is already in each)",
+    options: { note: { type: "string" } },
+    async run({ values, client }) {
+      const note = typeof values.note === "string" ? noteKey(values.note) : undefined;
+      const items = await myMagazines(client, note);
+      return { count: items.length, magazines: items };
+    }
+  },
+  "magazine add": {
+    usage: "magazine add <magazineKey|url> <noteKey|url>",
+    summary: "Add an article (yours or anyone's published one) to your magazine",
+    args: 2,
+    async run({ positionals, client }) {
+      const magazine = magazineKey(positionals[0]);
+      const key = noteKey(positionals[1]);
+      await addToMagazine(client, magazine, key, true);
+      return { added: true, magazine, key };
+    }
+  },
+  "magazine remove": {
+    usage: "magazine remove <magazineKey|url> <noteKey|url>",
+    summary: "Remove an article from your magazine",
+    args: 2,
+    async run({ positionals, client }) {
+      const magazine = magazineKey(positionals[0]);
+      const key = noteKey(positionals[1]);
+      await addToMagazine(client, magazine, key, false);
+      return { removed: true, magazine, key };
+    }
+  },
+  notices: {
+    usage: "notices",
+    summary: "Unread notification and message counts",
+    async run({ client }) {
+      return noticeCounts(client);
+    }
+  },
+  "membership plans": {
+    usage: "membership plans",
+    summary: "Your membership (\u30E1\u30F3\u30D0\u30FC\u30B7\u30C3\u30D7) plans",
+    async run({ client }) {
+      const plans = await membershipPlans(client);
+      return { count: plans.length, plans };
+    }
+  },
+  "membership joined": {
+    usage: "membership joined",
+    summary: "Memberships you belong to",
+    async run({ client }) {
+      return membershipSummaries(client);
+    }
   }
 };
 async function finishLogin(cookies) {
@@ -2598,16 +3686,157 @@ async function finishLogin(cookies) {
   const path = await saveSession({ cookies, urlname: me.urlname, userId: me.id, savedAt: new Date().toISOString() });
   return { loggedIn: true, urlname: me.urlname, nickname: me.nickname, sessionPath: path };
 }
-async function loadArticle(file, titleOverride) {
-  const source = file === "-" ? await readStdin() : await readFile3(file, "utf8").catch((e) => {
+async function readArticleInput(file, values) {
+  const source = file === "-" ? await readStdin() : await readFile4(file, "utf8").catch((e) => {
     throw new CliError("INVALID_INPUT", `Cannot read ${file}: ${e.message}`);
   });
+  const baseDir = file === "-" ? process.cwd() : dirname2(resolve2(file));
   const parsed = parseArticle(source);
-  const title = typeof titleOverride === "string" && titleOverride || parsed.title;
+  const title = typeof values.title === "string" && values.title || parsed.title;
   if (!title)
     throw new CliError("INVALID_INPUT", "No title: add frontmatter `title:`, a leading `# Title`, or --title.");
-  const { html, bodyLength, warnings } = markdownToNoteHtml(parsed.markdown);
-  return { title, html, bodyLength, warnings };
+  const images = new Map;
+  const byPath = new Map;
+  for (const src of imageRefs(parsed.markdown).filter(isLocalImageRef)) {
+    const path = resolveImagePath(src, baseDir);
+    const image = byPath.get(path) ?? await readImage(path);
+    byPath.set(path, image);
+    images.set(src, image);
+  }
+  const eyecatchPath = typeof values.eyecatch === "string" ? resolve2(values.eyecatch) : parsed.frontmatter.eyecatch ? resolveImagePath(parsed.frontmatter.eyecatch, baseDir) : null;
+  const eyecatch = eyecatchPath ? await readImage(eyecatchPath) : null;
+  return { title, markdown: parsed.markdown, images, eyecatch };
+}
+function dryRunResult(input) {
+  const preview = new Map([...input.images.keys()].map((src) => [src, src]));
+  const { html, bodyLength, warnings } = markdownToNoteHtml(input.markdown, { images: preview });
+  return {
+    dryRun: true,
+    title: input.title,
+    html,
+    bodyLength,
+    images: [...input.images].map(([src, f]) => ({ src, path: f.path, mimeType: f.mimeType, bytes: f.bytes.length })),
+    eyecatch: input.eyecatch ? { path: input.eyecatch.path, mimeType: input.eyecatch.mimeType, bytes: input.eyecatch.bytes.length } : null,
+    warnings: [...warnings, ...input.eyecatch ? [eyecatchRatioWarning(input.eyecatch)].filter((w2) => !!w2) : []]
+  };
+}
+async function uploadAndConvert(client, input) {
+  const urls = new Map;
+  const byPath = new Map;
+  for (const [src, file] of input.images) {
+    let url = byPath.get(file.path);
+    if (!url) {
+      url = (await uploadImage(client, file)).url;
+      byPath.set(file.path, url);
+    }
+    urls.set(src, url);
+  }
+  const { html, bodyLength, warnings } = markdownToNoteHtml(input.markdown, { images: urls });
+  return { title: input.title, html, bodyLength, warnings, images: [...urls].map(([src, url]) => ({ src, url })) };
+}
+async function applyEyecatch(client, noteId, file) {
+  if (!file)
+    return { result: null, warnings: [] };
+  try {
+    const { url } = await setEyecatch(client, noteId, file);
+    return { result: { path: file.path, set: true, url }, warnings: [] };
+  } catch (e) {
+    if (!(e instanceof CliError) || e.code === "NOT_LOGGED_IN")
+      throw e;
+    return {
+      result: { path: file.path, set: false, url: null },
+      warnings: [`${e.message} The draft was saved without an eyecatch; fix the image and run \`draft update\` with --eyecatch.`]
+    };
+  }
+}
+function imagesField(images, eyecatch) {
+  return {
+    ...images.length ? { images } : {},
+    ...eyecatch.result ? { eyecatch: eyecatch.result } : {}
+  };
+}
+function list(value) {
+  const raw = Array.isArray(value) ? value : value === undefined ? [] : [value];
+  return raw.filter((x2) => typeof x2 === "string").flatMap((x2) => x2.split(/[,\u3001]/)).map((x2) => x2.trim()).filter(Boolean);
+}
+function publishSettings(values) {
+  const price = int(values.price, "price");
+  if (price !== 0 && (price < 100 || price > 50000)) {
+    throw new CliError("USAGE", "--price must be 0 (free) or between 100 and 50000 yen.");
+  }
+  let publishAt;
+  if (typeof values.schedule === "string") {
+    const at2 = new Date(values.schedule);
+    if (Number.isNaN(at2.getTime())) {
+      throw new CliError("USAGE", `--schedule is not a date/time: "${values.schedule}". Use e.g. 2026-12-01T09:00+09:00.`);
+    }
+    if (at2.getTime() < Date.now() + 5 * 60000)
+      throw new CliError("USAGE", "--schedule must be at least 5 minutes in the future.");
+    publishAt = at2.toISOString();
+  }
+  return {
+    hashtags: [...new Set(list(values.hashtag).map(hashtag))],
+    price,
+    magazineKeys: [...new Set(list(values.magazine).map(magazineKey))],
+    publishAt,
+    notify: !values["no-notify"],
+    toc: Boolean(values.toc),
+    disableComments: Boolean(values["disable-comments"]),
+    refund: Boolean(values.refund)
+  };
+}
+function noteFromDraft(data) {
+  const draft = data?.note_draft ?? {};
+  const name = draft.name ?? data?.name;
+  const body = draft.body ?? data?.body;
+  if (typeof name !== "string" || !name.trim())
+    throw new CliError("INVALID_INPUT", "The draft has no title; set one before publishing.");
+  if (typeof body !== "string" || !body.trim())
+    throw new CliError("INVALID_INPUT", "The draft has no body; save content before publishing.");
+  return { name, body, slug: typeof data?.slug === "string" ? data.slug : null };
+}
+async function savedNote(client, key) {
+  const data = await getDraft(client, key);
+  if (!data)
+    throw new CliError("NOT_FOUND", `Could not find your article ${key}.`);
+  return noteFromDraft(data);
+}
+function publishPreview(p) {
+  return {
+    title: p.name,
+    status: p.status,
+    publishAt: p.publish_at ?? null,
+    price: p.price,
+    hashtags: p.hashtags.map((h) => h.slice(1)),
+    magazineKeys: p.magazine_keys,
+    toc: p.index,
+    disableComments: p.disable_comment,
+    refund: p.is_refund,
+    notify: p.send_notifications_flag,
+    bodyLength: p.body_length,
+    freeLength: visibleTextLength(p.free_body),
+    paidLength: visibleTextLength(p.pay_body),
+    images: p.image_keys.length
+  };
+}
+function publishError(res, settings) {
+  const message = res.body?.error?.message ?? (typeof res.body === "string" ? res.body.slice(0, 300) : JSON.stringify(res.body ?? null).slice(0, 300));
+  if (settings.publishAt && res.status === 422 && /\u4E88\u7D04/.test(message)) {
+    return new CliError("FORBIDDEN", `note refused the scheduled post (${message}). Scheduled posting needs a note premium account.`, {
+      status: res.status,
+      detail: res.body
+    });
+  }
+  const code = res.status === 401 ? "AUTH_ERROR" : "PUBLISH_FAILED";
+  return new CliError(code, `Publishing failed: HTTP ${res.status}. ${message}`, { status: res.status, detail: { challenges: res.challenges, body: res.body } });
+}
+async function follow(client, urlname2, on) {
+  const creator = await getCreator(client, urlname2);
+  const userKey = creator?.key;
+  if (typeof userKey !== "string")
+    throw new CliError("NOT_FOUND", `Could not find creator "${urlname2}".`);
+  await followUser(client, userKey, on);
+  return { following: on, urlname: urlname2, nickname: creator?.nickname ?? null };
 }
 function parseImportedCookies(raw) {
   const s = raw.trim();
@@ -2694,7 +3923,7 @@ ${helpText()}`);
     if (positionals.length < (cmd.args ?? 0))
       throw new CliError("USAGE", `Usage: note-cli ${cmd.usage}`);
     const client = deps.client ?? new NoteClient;
-    const result = await cmd.run({ values, positionals, client });
+    const result = await cmd.run({ values, positionals, client, deps });
     console.log(JSON.stringify(result, null, 2));
     return 0;
   } catch (e) {
