@@ -49,3 +49,14 @@ test("a scheduled publish sends status reserved and publish_at", () => {
   assert.equal(p.publish_at, "2026-12-01T00:00:00.000Z");
   assert.equal(p.slug, "slug-1");
 });
+
+test("embedded figures with nested markup stay single blocks in the free/paid split", () => {
+  const att = '<figure name="f" id="f" embedded-service="attachment" embedded-content-key="e"><div class="a"><div><a href="x"><i class="icon"></i><strong>a.pdf</strong></a></div></div></figure>';
+  const html = `<p name="p1" id="p1">free</p>${att}<paywall-line></paywall-line><p name="p2" id="p2">paid</p>`;
+  assert.deepEqual(topLevelBlocks(html).length, 4);
+  const p = buildPublishPayload({ name: "T", body: html, key: "nabc" }, { ...base, price: 100 });
+  assert.equal(p.free_body, `<p name="p1" id="p1">free</p>${att}`);
+  assert.equal(p.separator, "f");
+  assert.equal(p.body_length, 8);
+  assert.equal(p.slug, "slug-nabc");
+});

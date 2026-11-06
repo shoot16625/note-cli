@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
-import { htmlToText, imageRefs, markdownToNoteHtml, parseArticle, safeHref, visibleTextLength } from "../src/markdown.ts";
+import { blockLinks, htmlToText, imageRefs, markdownToNoteHtml, obsidianToMarkdown, parseArticle, safeHref, visibleTextLength } from "../src/markdown.ts";
 
 test("parseArticle prefers frontmatter title and strips frontmatter", () => {
   const a = parseArticle("---\ntitle: \"FM Title\"\ntags: x\n---\n# H1 Title\n\nbody");
@@ -101,4 +101,39 @@ test("imageRefs lists each image src once, including nested ones", () => {
 test("htmlToText keeps images as Markdown", () => {
   const t = htmlToText('<p>Hi</p><figure><img src="https://x/1.png" alt="a" width="620"><figcaption>Cap</figcaption></figure>');
   assert.equal(t, "Hi\n\n![a](https://x/1.png)\nCap");
+});
+
+test("blockLinks finds bare URLs and local-file links that stand alone", () => {
+  const md = [
+    "https://youtu.be/abc",
+    "<https://x.com/u/status/1>",
+    "[titled](https://example.com)",
+    "text https://inline.example.com",
+    "[file](./a.pdf)",
+    "[anchor](#top)",
+    "- https://in-a-list.example.com",
+    "```\nhttps://in-code.example.com\n```",
+  ].join("\n\n");
+  assert.deepEqual(blockLinks(md), { urls: ["https://youtu.be/abc", "https://x.com/u/status/1"], files: ["./a.pdf"] });
+});
+
+test("embeds become figures and their widget text is not counted", () => {
+  const embeds = new Map([
+    ["https://youtu.be/abc", { service: "youtube", key: "emb1", url: "https://youtu.be/abc", identifier: null, html: null }],
+    ["a.pdf", { service: "attachment", key: "emb2", url: null, identifier: "x", html: '<div><strong class="file-widget__filename">a.pdf</strong></div>' }],
+  ]);
+  const r = markdownToNoteHtml("hi\n\nhttps://youtu.be/abc\n\n[doc](a.pdf)", { embeds });
+  assert.match(r.html, /<figure data-src="https:\/\/youtu.be\/abc" data-identifier="null" embedded-service="youtube" embedded-content-key="emb1" name="[^"]+" id="[^"]+"><\/figure>/);
+  assert.match(r.html, /<figure embedded-service="attachment" embedded-content-key="emb2" name="[^"]+" id="[^"]+"><div>/);
+  assert.equal(r.bodyLength, 2);
+  assert.equal(htmlToText(r.html), "hi\n\nhttps://youtu.be/abc\n\n[attachment: a.pdf]");
+});
+
+test("obsidianToMarkdown converts embeds, wikilinks and highlights outside code", () => {
+  const md = "![[img one.png|alt]] ![[pic.png|300]] [[Page]] [[Page|label]] ==mark== `==code==`\n```\n==fenced== [[x]]\n```";
+  assert.equal(
+    obsidianToMarkdown(md),
+    "![alt](<img one.png>) ![](<pic.png>) Page label **mark** `==code==`\n```\n==fenced== [[x]]\n```",
+  );
+  assert.deepEqual(imageRefs(parseArticle("# T\n\n![[a b.png]]").markdown), ["a b.png"]);
 });

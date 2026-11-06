@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Marked, type Tokens } from "marked";
+import type { Embed } from "./embeds.ts";
 
 export interface ParsedArticle {
   title: string | undefined;
@@ -11,6 +12,11 @@ export interface ParsedArticle {
 export interface ConvertOptions {
   /** Markdown image src -> uploaded image URL. Images found here become `<figure>` blocks. */
   images?: ReadonlyMap<string, string>;
+  /**
+   * A paragraph that is only a link becomes an embed when its href is here: a bare URL -> an
+   * embed card/player, a local file path -> a download attachment.
+   */
+  embeds?: ReadonlyMap<string, Embed>;
 }
 
 export interface ConvertResult {
@@ -42,7 +48,7 @@ export function parseArticle(source: string): ParsedArticle {
       markdown = markdown.slice(h1[0].length);
     }
   }
-  return { title, markdown: markdown.replace(/^\n+/, ""), frontmatter };
+  return { title, markdown: obsidianToMarkdown(markdown.replace(/^\n+/, "")), frontmatter };
 }
 
 /**
@@ -54,12 +60,16 @@ export function parseArticle(source: string): ParsedArticle {
 export function markdownToNoteHtml(markdown: string, opts: ConvertOptions = {}): ConvertResult {
   const warnings: string[] = [];
   const images = opts.images ?? new Map<string, string>();
+  const embeds = opts.embeds ?? new Map<string, Embed>();
   const marked = new Marked({ gfm: true, breaks: true });
   const uploaded = (t: Tokens.Generic) => t.type === "image" && images.has((t as Tokens.Image).href);
 
   marked.use({
     renderer: {
       paragraph(this: any, token: Tokens.Paragraph) {
+        const lone = loneLink(token);
+        const embed = lone ? embeds.get(lone.href.trim()) : undefined;
+        if (embed) return embedFigure(embed);
         // note has no inline images: lift uploaded images out of the paragraph into their own <figure> blocks.
         if (!token.tokens.some(uploaded)) return `<p>${this.parser.parseInline(token.tokens)}</p>\n`;
         let out = "";
@@ -147,6 +157,88 @@ function figure(src: string, token: Tokens.Image): string {
   return `<figure><img src="${escapeAttr(src)}" alt="${escapeAttr(token.text ?? "")}" width="620" height="auto">${caption}</figure>\n`;
 }
 
+/** The link when a paragraph holds nothing else (ignoring surrounding whitespace). */
+function loneLink(token: Tokens.Paragraph): Tokens.Link | null {
+  const parts = token.tokens.filter((t) => !(t.type === "text" && !t.raw.trim()) && t.type !== "br");
+  return parts.length === 1 && parts[0].type === "link" ? (parts[0] as Tokens.Link) : null;
+}
+
+/** The figure note's editor stores for an embed; note renders the player/card from the key. */
+function embedFigure(e: Embed): string {
+  const attrs = [
+    e.url ? `data-src="${escapeAttr(e.url)}"` : "",
+    e.service === "attachment" ? "" : `data-identifier="${escapeAttr(e.identifier ?? "null")}"`,
+    `embedded-service="${escapeAttr(e.service)}"`,
+    `embedded-content-key="${escapeAttr(e.key)}"`,
+  ].filter(Boolean);
+  // Attachments keep note's own download widget inside the figure; other embeds are empty.
+  return `<figure ${attrs.join(" ")}>${e.service === "attachment" ? (e.html ?? "") : ""}</figure>\n`;
+}
+
+export interface BlockLinks {
+  /** Bare http(s) URLs on their own line: candidates for embeds. */
+  urls: string[];
+  /** Links to local files on their own line: candidates for attachments. */
+  files: string[];
+}
+
+/** Paragraphs that are a single link, the way an embed or attachment is written. */
+export function blockLinks(markdown: string): BlockLinks {
+  const urls = new Set<string>();
+  const files = new Set<string>();
+  const m = new Marked({ gfm: true, breaks: true });
+  for (const t of m.lexer(markdown)) {
+    if (t.type !== "paragraph") continue;
+    const link = loneLink(t as Tokens.Paragraph);
+    if (!link) continue;
+    const href = link.href.trim();
+    if (/^https?:\/\//i.test(href)) {
+      // Only a bare URL (the text is the URL itself) embeds; [text](url) stays a link.
+      if (link.text.trim() === href || link.text.trim() === link.raw.trim().replace(/^<|>$/g, "")) urls.add(href);
+    } else if (href && !href.startsWith("#") && !/^[a-z][a-z0-9+.-]*:/i.test(href) && !href.startsWith("//")) {
+      files.add(href);
+    } else if (/^file:\/\//i.test(href)) {
+      files.add(href);
+    }
+  }
+  return { urls: [...urls], files: [...files] };
+}
+
+/**
+ * Obsidian-flavoured Markdown -> plain Markdown, outside code: `![[img.png|alt]]` -> an image,
+ * `[[Page|label]]` -> its label as text, `==highlight==` -> bold.
+ */
+export function obsidianToMarkdown(markdown: string): string {
+  let inFence: string | null = null;
+  return markdown
+    .split("\n")
+    .map((line) => {
+      const fence = line.match(/^\s*(`{3,}|~{3,})/);
+      if (fence) {
+        if (!inFence) inFence = fence[1][0];
+        else if (fence[1][0] === inFence) inFence = null;
+        return line;
+      }
+      if (inFence) return line;
+      // Leave inline code spans alone.
+      return line
+        .split(/(`+[^`]*`+)/)
+        .map((part, i) =>
+          i % 2
+            ? part
+            : part
+                .replace(/!\[\[([^\]|]+?)(?:\|([^\]]*))?\]\]/g, (_, src: string, alt = "") => {
+                  const target = src.trim();
+                  return /^\d+(x\d+)?$/.test(alt.trim()) ? `![](<${target}>)` : `![${alt.trim()}](<${target}>)`;
+                })
+                .replace(/\[\[([^\]|]+?)(?:\|([^\]]*))?\]\]/g, (_, page: string, label?: string) => (label ?? page).trim())
+                .replace(/==(?=\S)([^=\n]+?)(?<=\S)==/g, "**$1**"),
+        )
+        .join("");
+    })
+    .join("\n");
+}
+
 /** Every image src in the Markdown, in order, without duplicates. */
 export function imageRefs(markdown: string): string[] {
   const refs = new Set<string>();
@@ -187,6 +279,8 @@ function stripDangerous(html: string): string {
 
 export function visibleTextLength(html: string): number {
   const text = html
+    // Embeds and attachments are atoms in the editor: their widget text does not count.
+    .replace(/<figure\b[^>]*\sembedded-service="[^"]*"[^>]*>[\s\S]*?<\/figure>/gi, "")
     .replace(/<paywall-line[^>]*>\s*<\/paywall-line>/gi, "")
     .replace(/<br\s*\/?>/gi, "")
     .replace(/<[^>]+>/g, "")
@@ -197,6 +291,14 @@ export function visibleTextLength(html: string): number {
 /** Rough HTML -> plain text, used for reading drafts/articles back. */
 export function htmlToText(html: string): string {
   return html
+    .replace(/<figure\b[^>]*\sembedded-service="([^"]*)"[^>]*>([\s\S]*?)<\/figure>/gi, (tag, service: string, inner: string) => {
+      if (service === "attachment") {
+        const name = inner.match(/file-widget__filename[^>]*>([^<]*)</)?.[1] ?? "file";
+        return `\n[attachment: ${name}]\n`;
+      }
+      const src = tag.match(/\sdata-src="([^"]*)"/)?.[1];
+      return src && src !== "null" ? `\n${src}\n` : `\n[${service} embed]\n`;
+    })
     .replace(/<img\b[^>]*>/gi, (tag) => {
       const attr = (name: string) => tag.match(new RegExp(`\\s${name}="([^"]*)"`, "i"))?.[1] ?? "";
       return `\n![${attr("alt")}](${attr("src")})\n`;

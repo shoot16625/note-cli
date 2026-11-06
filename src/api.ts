@@ -599,3 +599,196 @@ export async function membershipSummaries(client: NoteClient): Promise<{ total: 
   const d = res?.data ?? {};
   return { total: num(d.totalCount ?? d.total_count), items: Array.isArray(d.summaries) ? d.summaries : [] };
 }
+
+/** A membership and its plans, as offered when choosing who may read an article. */
+export interface MembershipAccess {
+  circle: { key: string; name: string | null };
+  plans: Array<{ key: string; name: string | null }>;
+}
+
+export async function membershipAccess(client: NoteClient): Promise<MembershipAccess[]> {
+  const res = await client.request("/v3/memberships/circle_permissions", { auth: "required" });
+  const rows: any[] = Array.isArray(res?.data) ? res.data : [];
+  return rows
+    .filter((r) => typeof r?.circle?.key === "string")
+    .map((r) => ({
+      circle: { key: r.circle.key, name: r.circle.name ?? null },
+      plans: (Array.isArray(r.circle_plans) ? r.circle_plans : [])
+        .filter((p: any) => typeof p?.key === "string")
+        .map((p: any) => ({ key: p.key, name: p.name ?? null })),
+    }));
+}
+
+// ---------------- dashboard (GraphQL) ----------------
+
+const GRAPHQL_URL = "https://graphql.note.com/graphql";
+
+/**
+ * Run a query on note's GraphQL API as the logged-in user. The API takes a short-lived JWT that
+ * `POST /v3/graphql/auth` sets as the `note_gql_auth_token` cookie; without it, dashboard
+ * queries quietly return zeros instead of failing.
+ */
+export async function graphql<T = any>(client: NoteClient, query: string, variables: Record<string, unknown>): Promise<T> {
+  const auth = await client.requestRaw("/v3/graphql/auth", { method: "POST", auth: "required" });
+  const token = auth.headers
+    .getSetCookie()
+    .map((c) => c.match(/^note_gql_auth_token=([^;]+)/)?.[1])
+    .find(Boolean);
+  if (!token) throw new CliError("AUTH_ERROR", "note did not issue a GraphQL token; run `note-cli auth login` again.");
+  const res = await client.request(GRAPHQL_URL, { method: "POST", json: { query, variables }, bearer: token });
+  if (Array.isArray(res?.errors) && res.errors.length) {
+    throw new CliError("API_ERROR", `GraphQL error: ${res.errors.map((e: any) => e?.message).join("; ")}`, { detail: res.errors });
+  }
+  return res?.data as T;
+}
+
+export const DASHBOARD_PERIODS = {
+  "7d": "LAST_7_DAYS",
+  "28d": "LAST_28_DAYS",
+  "365d": "LAST_365_DAYS",
+  all: "ALL",
+  "this-month": "THIS_MONTH",
+  "last-month": "LAST_MONTH",
+  custom: "CUSTOM",
+} as const;
+export type DashboardPeriod = keyof typeof DASHBOARD_PERIODS;
+
+export const DASHBOARD_ORDERS = {
+  published: "PUBLISHED_DATE_DESC",
+  pv: "PAGE_VIEW_COUNT_DESC",
+  impressions: "IMPRESSION_COUNT_DESC",
+  likes: "LIKE_COUNT_DESC",
+  comments: "COMMENT_COUNT_DESC",
+  sales: "SALES_DESC",
+} as const;
+export type DashboardOrder = keyof typeof DASHBOARD_ORDERS;
+
+export const DASHBOARD_METRICS = { impressions: "IMPRESSION", pv: "PAGE_VIEW", likes: "LIKE", comments: "COMMENT", sales: "SALES" } as const;
+export type DashboardMetric = keyof typeof DASHBOARD_METRICS;
+
+/** The variables note's dashboard sends: a period unit plus its first day (and last day for custom). */
+export function dashboardRange(period: DashboardPeriod, opts: { from?: string; to?: string; now?: Date } = {}) {
+  const now = opts.now ?? new Date();
+  const day = (d: Date) => {
+    // The dashboard works in Japan time.
+    const jst = new Date(d.getTime() + 9 * 3600_000);
+    return jst.toISOString().slice(0, 10);
+  };
+  const minus = (days: number) => new Date(now.getTime() - days * 86400_000);
+  const today = day(now);
+  switch (period) {
+    case "7d":
+      return { unit: "LAST_7_DAYS", date: day(minus(6)), endDate: null, from: day(minus(6)), to: today };
+    case "28d":
+      return { unit: "LAST_28_DAYS", date: day(minus(27)), endDate: null, from: day(minus(27)), to: today };
+    case "365d":
+      return { unit: "LAST_365_DAYS", date: day(minus(364)), endDate: null, from: day(minus(364)), to: today };
+    case "all":
+      return { unit: "ALL", date: today, endDate: null, from: null, to: today };
+    case "this-month":
+      return { unit: "THIS_MONTH", date: `${today.slice(0, 7)}-01`, endDate: null, from: `${today.slice(0, 7)}-01`, to: today };
+    case "last-month": {
+      const [y, m] = today.split("-").map(Number);
+      const first = m === 1 ? `${y - 1}-12-01` : `${y}-${String(m - 1).padStart(2, "0")}-01`;
+      return { unit: "LAST_MONTH", date: first, endDate: null, from: first, to: null };
+    }
+    case "custom": {
+      if (!opts.from || !opts.to) throw new CliError("USAGE", "--period custom needs --from and --to (YYYY-MM-DD).");
+      return { unit: "CUSTOM", date: opts.from, endDate: opts.to, from: opts.from, to: opts.to };
+    }
+  }
+}
+
+type Range = ReturnType<typeof dashboardRange>;
+const rangeVars = (r: Range) => ({ unit: r.unit, date: r.date, endDate: r.endDate });
+
+const METRIC_FIELDS = "pageViewCount impressionCount likeCount commentCount salesAmount";
+
+export interface DashboardMetrics {
+  pageViews: number | null;
+  impressions: number | null;
+  likes: number | null;
+  comments: number | null;
+  sales: number | null;
+}
+
+const metrics = (m: any): DashboardMetrics => ({
+  pageViews: num(m?.pageViewCount),
+  impressions: num(m?.impressionCount),
+  likes: num(m?.likeCount),
+  comments: num(m?.commentCount),
+  sales: num(m?.salesAmount),
+});
+
+export async function dashboardSummary(client: NoteClient, range: Range) {
+  const data = await graphql(
+    client,
+    `query Summary($unit: DashboardPeriodUnit!, $date: Datetime!, $endDate: Datetime) {
+      dashboardSummary(unit: $unit, date: $date, endDate: $endDate) { lastUpdatedAt metrics { ${METRIC_FIELDS} } }
+    }`,
+    rangeVars(range),
+  );
+  return { lastUpdatedAt: data?.dashboardSummary?.lastUpdatedAt ?? null, totals: metrics(data?.dashboardSummary?.metrics) };
+}
+
+/** Per-article numbers for the period, drafts included, newest first unless `order` says otherwise. */
+export async function dashboardNotes(client: NoteClient, range: Range, opts: { order: DashboardOrder; limit: number }) {
+  const notes: Array<{ key: string | null; title: string | null; status: string | null; publishedAt: string | null; url: string | null } & DashboardMetrics> = [];
+  let after: string | null = null;
+  while (notes.length < opts.limit) {
+    const data: any = await graphql(
+      client,
+      `query Notes($unit: DashboardPeriodUnit!, $date: Datetime!, $endDate: Datetime, $order: DashboardNoteListOrder, $first: Int!, $after: String) {
+        dashboardNoteListConnection(unit: $unit, date: $date, endDate: $endDate, order: $order, first: $first, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          edges { node { note { key title status publishedAt link { absoluteUrl } } metrics { ${METRIC_FIELDS} } } }
+        }
+      }`,
+      { ...rangeVars(range), order: DASHBOARD_ORDERS[opts.order], first: Math.min(50, opts.limit - notes.length), after },
+    );
+    const conn = data?.dashboardNoteListConnection;
+    for (const edge of conn?.edges ?? []) {
+      const n = edge?.node?.note ?? {};
+      notes.push({
+        key: n.key ?? null,
+        title: n.title ?? null,
+        status: n.status ?? null,
+        publishedAt: n.publishedAt ?? null,
+        url: n.link?.absoluteUrl ?? null,
+        ...metrics(edge?.node?.metrics),
+      });
+    }
+    if (!conn?.pageInfo?.hasNextPage || !conn.pageInfo.endCursor) break;
+    after = conn.pageInfo.endCursor;
+  }
+  return notes.slice(0, opts.limit);
+}
+
+/** Where readers came from (note.com, search engines, X, ChatGPT, ...). */
+export async function dashboardReferrers(client: NoteClient, range: Range) {
+  const data = await graphql(
+    client,
+    `query Referrers($unit: DashboardPeriodUnit!, $date: Datetime!, $endDate: Datetime) {
+      dashboardNoteReferrersChart(unit: $unit, date: $date, endDate: $endDate) { legend { name count } }
+    }`,
+    rangeVars(range),
+  );
+  const legend: any[] = data?.dashboardNoteReferrersChart?.legend ?? [];
+  return legend.map((l) => ({ name: l?.name ?? null, count: num(l?.count) }));
+}
+
+/** One metric over time, by day/week/month depending on the period. */
+export async function dashboardChart(client: NoteClient, range: Range, metric: DashboardMetric) {
+  const data = await graphql(
+    client,
+    `query Chart($unit: DashboardPeriodUnit!, $date: Datetime!, $endDate: Datetime, $metric: DashboardMetricKind!) {
+      dashboardMetricChart(unit: $unit, date: $date, endDate: $endDate, metric: $metric) { granularity points { label value startDate endDate } }
+    }`,
+    { ...rangeVars(range), metric: DASHBOARD_METRICS[metric] },
+  );
+  const chart = data?.dashboardMetricChart;
+  return {
+    granularity: chart?.granularity ?? null,
+    points: (chart?.points ?? []).map((p: any) => ({ from: p?.startDate ?? null, to: p?.endDate ?? null, value: num(p?.value) })),
+  };
+}

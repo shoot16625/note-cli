@@ -6,4 +6,4 @@ This extension adds skills for note.com, built on the bundled `note-cli` (`dist/
 - `skills/publish/SKILL.md`: publish, schedule, unpublish and delete articles; manage magazines
 - `skills/engage/SKILL.md`: like, comment, follow; notifications and memberships
 - `skills/research/SKILL.md`: search and analyze note.com articles, hashtags and creators
-- `skills/my-stats/SKILL.md`: review the logged-in user's page views, likes and comments
+- `skills/my-stats/SKILL.md`: review the logged-in user's dashboard: page views, impressions, likes, comments, sales and referrers

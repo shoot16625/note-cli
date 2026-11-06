@@ -31,8 +31,9 @@ export function urlname(input: string): string {
 /** A hashtag name without the leading #. Rejects anything that could change the request path. */
 export function hashtag(input: string): string {
   const name = input.trim().replace(/^#/, "");
-  if (!name || name.length > 100 || /[\s/\\?#%]/.test(name) || /^\.+$/.test(name)) {
-    throw new CliError("USAGE", `Not a valid hashtag: "${input}".`);
+  // note silently drops *every* hashtag of an article when one of them contains a dot or a space.
+  if (!name || name.length > 100 || /[\s/\\?#%.]/.test(name)) {
+    throw new CliError("USAGE", `Not a valid hashtag: "${input}" (no spaces, dots or / ? # %).`);
   }
   return name;
 }

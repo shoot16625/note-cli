@@ -28,6 +28,8 @@ export interface RequestOptions {
   auth?: "none" | "optional" | "required";
   /** Mimic requests from the editor (needed for draft APIs). */
   editor?: boolean;
+  /** Send `Authorization: Bearer <token>` (note's GraphQL API). */
+  bearer?: string;
 }
 
 export class NoteClient {
@@ -49,6 +51,11 @@ export class NoteClient {
   }
 
   async request<T = any>(path: string, opts: RequestOptions = {}): Promise<T> {
+    return (await this.requestRaw(path, opts)).data as T;
+  }
+
+  /** Like request(), but also returns the response headers (e.g. Set-Cookie). */
+  async requestRaw(path: string, opts: RequestOptions = {}): Promise<{ status: number; headers: Headers; data: any }> {
     const method = opts.method ?? "GET";
     const url = new URL(path.startsWith("http") ? path : `${NOTE_ORIGIN}/api${path}`);
     for (const [k, v] of Object.entries(opts.query ?? {})) {
@@ -76,6 +83,8 @@ export class NoteClient {
         if (xsrf) headers["X-XSRF-TOKEN"] = safeDecode(xsrf);
       }
     }
+
+    if (opts.bearer) headers.Authorization = `Bearer ${opts.bearer}`;
 
     if (method !== "GET") {
       const origin = opts.editor ? EDITOR_ORIGIN : NOTE_ORIGIN;
@@ -134,7 +143,7 @@ export class NoteClient {
         detail: typeof data === "string" ? data.slice(0, 500) : data,
       });
     }
-    return data as T;
+    return { status: res.status, headers: res.headers, data };
   }
 
   /**

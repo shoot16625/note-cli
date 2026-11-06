@@ -3,7 +3,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "bun:test";
-import { main, noteKey, parseImportedCookies } from "../src/cli.ts";
+import { circlePermissions, main, noteKey, parseImportedCookies } from "../src/cli.ts";
 import { NoteClient } from "../src/client.ts";
 import { parseCookieHeader } from "../src/session.ts";
 import * as v from "../src/validate.ts";
@@ -15,7 +15,7 @@ interface Call {
   body: any;
 }
 
-function fakeClient(responses: Array<{ status?: number; body: unknown }>, cookies: Record<string, string> | null) {
+function fakeClient(responses: Array<{ status?: number; body: unknown; headers?: [string, string][] }>, cookies: Record<string, string> | null) {
   const calls: Call[] = [];
   const fetchImpl = (async (input: URL, init: RequestInit) => {
     calls.push({
@@ -25,7 +25,7 @@ function fakeClient(responses: Array<{ status?: number; body: unknown }>, cookie
       body: init.body instanceof FormData ? init.body : init.body ? JSON.parse(String(init.body)) : undefined,
     });
     const r = responses.shift() ?? { body: {} };
-    return new Response(JSON.stringify(r.body), { status: r.status ?? 200 });
+    return new Response(JSON.stringify(r.body), { status: r.status ?? 200, headers: r.headers });
   }) as unknown as typeof fetch;
   const client = new NoteClient({
     session: cookies ? { cookies, savedAt: "test" } : null,
@@ -533,4 +533,137 @@ test("a 403 that carries a message is a refusal, not an expired session", async 
   assert.equal(err.code, "FORBIDDEN");
   assert.match(err.message, /下書きに戻すことができません。 ・有料記事/);
   assert.doesNotMatch(err.message, /auth login/);
+});
+
+test("draft create turns lone URLs into embeds and lone local-file links into attachments", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "note-cli-"));
+  const file = join(dir, "post.md");
+  await writeFile(join(dir, "doc.pdf"), "%PDF-1.1");
+  await writeFile(
+    file,
+    "# T\n\nhttps://www.youtube.com/watch?v=abc\n\nhttps://note.com/someone/n/n0123456789ab\n\n[資料](doc.pdf)\n\nsee [a link](https://x.com/y) inline\n\nhttps://example.com/broken",
+  );
+  const { client, calls } = fakeClient(
+    [
+      { body: { data: { id: 42, key: "nabcdef123456" } } },
+      { body: { data: { key: "embyt", html_for_embed: "<span></span>" } } },
+      { body: { data: { embedded_content: { key: "embnote" } } } },
+      { body: { data: { type: null } } },
+      { status: 400, body: { data: { error: "指定された URL の内容を取得できませんでした" } } },
+      { body: { data: { attachment_key: "a".repeat(32), embedded_content_key: "embfile", html_for_embed: '<div class="file-widget"><strong class="file-widget__filename">doc.pdf</strong></div>' } } },
+      { body: { data: { result: true } } },
+    ],
+    SESSION,
+  );
+  const r = await capture(() => main(["draft", "create", file], { client }));
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.deepEqual(out.embeds.map((e: any) => e.service), ["youtube", "note", "attachment"]);
+  assert.equal(out.warnings.length, 1);
+  assert.match(out.warnings[0], /Could not embed https:\/\/example.com\/broken/);
+
+  assert.equal(calls[0].url.pathname, "/api/v1/text_notes");
+  assert.equal(calls[1].url.pathname, "/api/v2/embed_by_external_api");
+  assert.equal(calls[1].url.searchParams.get("service"), "youtube");
+  assert.equal(calls[1].url.searchParams.get("embeddable_key"), "nabcdef123456");
+  assert.equal(calls[2].url.pathname, "/api/v1/embed");
+  assert.equal((calls[2].body as FormData).get("embeddable_key"), "nabcdef123456");
+  assert.equal(calls[3].url.pathname, "/api/v2/embed_by_external_api/check_type");
+  assert.equal(calls[4].url.searchParams.get("service"), "external-article");
+  assert.equal(calls[5].url.pathname, "/api/v2/attachments/upload");
+  assert.equal((calls[5].body as FormData).get("note_key"), "nabcdef123456");
+
+  const body: string = calls[6].body.body;
+  assert.match(body, /<figure data-src="https:\/\/www.youtube.com\/watch\?v=abc" data-identifier="null" embedded-service="youtube" embedded-content-key="embyt" name="[^"]+" id="[^"]+"><\/figure>/);
+  assert.match(body, /data-identifier="n0123456789ab" embedded-service="note" embedded-content-key="embnote"/);
+  assert.match(body, /embedded-service="attachment" embedded-content-key="embfile"[^>]*><div class="file-widget">/);
+  assert.match(body, /<a href="https:\/\/x.com\/y">a link<\/a>/);
+  assert.match(body, /<a href="https:\/\/example.com\/broken">/);
+  // Widget text inside embeds does not count toward the article length.
+  assert.equal(calls[6].body.body_length, [..."see a link inline", ..."https://example.com/broken"].length);
+});
+
+test("--no-embed keeps URLs as links and a missing attachment fails before any request", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "note-cli-"));
+  const file = join(dir, "post.md");
+  await writeFile(file, "# T\n\nhttps://www.youtube.com/watch?v=abc");
+  const r = await capture(() => main(["draft", "create", file, "--no-embed", "--dry-run"]));
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).embeds, undefined);
+
+  await writeFile(file, "# T\n\n[資料](missing.pdf)");
+  const { client, calls } = fakeClient([], SESSION);
+  const r2 = await capture(() => main(["draft", "create", file], { client }));
+  assert.equal(r2.code, 1);
+  assert.match(JSON.parse(r2.stderr).error.message, /Cannot attach missing.pdf/);
+  assert.equal(calls.length, 0);
+});
+
+test("stats dashboard gets a GraphQL token, then sends it as a bearer token", async () => {
+  const token = ["set-cookie", "note_gql_auth_token=jwt123; path=/; secure"] as [string, string];
+  const { client, calls } = fakeClient(
+    [
+      { status: 201, body: "", headers: [token] },
+      { body: { data: { dashboardSummary: { lastUpdatedAt: "t", metrics: { pageViewCount: 10, impressionCount: null, likeCount: 2, commentCount: 0, salesAmount: 300 } } } } },
+      { status: 201, body: "", headers: [token] },
+      { body: { data: { dashboardNoteReferrersChart: { legend: [{ name: "note.com", count: 7 }] } } } },
+      { status: 201, body: "", headers: [token] },
+      {
+        body: {
+          data: {
+            dashboardNoteListConnection: {
+              pageInfo: { hasNextPage: true, endCursor: "c1" },
+              edges: [{ node: { note: { key: "n1", title: "A", status: "published", publishedAt: "p", link: { absoluteUrl: "u" } }, metrics: { pageViewCount: 10 } } }],
+            },
+          },
+        },
+      },
+    ],
+    SESSION,
+  );
+  const r = await capture(() => main(["stats", "dashboard", "--period", "7d", "--order", "likes", "--limit", "1"], { client }));
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.deepEqual(out.totals, { pageViews: 10, impressions: null, likes: 2, comments: 0, sales: 300 });
+  assert.deepEqual(out.referrers, [{ name: "note.com", count: 7 }]);
+  assert.equal(out.notes.length, 1);
+  assert.equal(out.notes[0].key, "n1");
+
+  assert.equal(calls[0].url.pathname, "/api/v3/graphql/auth");
+  assert.equal(calls[1].url.href, "https://graphql.note.com/graphql");
+  assert.equal(calls[1].headers.Authorization, "Bearer jwt123");
+  assert.equal(calls[1].headers.Cookie, undefined);
+  assert.equal(calls[1].body.variables.unit, "LAST_7_DAYS");
+  assert.equal(calls[5].body.variables.order, "LIKE_COUNT_DESC");
+  assert.equal(calls[5].body.variables.first, 1);
+});
+
+test("stats dashboard validates the period before any request", async () => {
+  const { client, calls } = fakeClient([], SESSION);
+  for (const args of [["--period", "custom"], ["--period", "7d", "--from", "2026-01-01"], ["--period", "custom", "--from", "2026-02-01", "--to", "2026-01-01"], ["--period", "week"]]) {
+    const r = await capture(() => main(["stats", "dashboard", ...args], { client }));
+    assert.equal(r.code, 2, args.join(" "));
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("publish --membership maps all/plans/none to circle_permissions", async () => {
+  const access = [{ circle: { key: "c1", name: "M" }, plans: [{ key: "p1", name: "A" }, { key: "p2", name: null }] }];
+  assert.deepEqual(circlePermissions(["all"], access), [{ kind: "circle", keys: ["c1"] }]);
+  assert.deepEqual(circlePermissions(["p1", "p2", "p1"], access), [{ kind: "circle_plan", keys: ["p1", "p2"] }]);
+  assert.deepEqual(circlePermissions(["none"], []), []);
+  assert.throws(() => circlePermissions(["p3"], access), /Unknown membership plan: p3\. Your plans: p1 \(A\), p2/);
+  assert.throws(() => circlePermissions(["all", "p1"], access), /already covers/);
+  assert.throws(() => circlePermissions(["all"], []), /no membership/);
+
+  const { client } = fakeClient(
+    [{ body: { data: [{ circle: { key: "c1" }, circle_plans: [{ key: "p1" }] }] } }, { body: DRAFT }],
+    SESSION,
+  );
+  const pub = fakePublisher({ status: 200 });
+  const r = await capture(() => main(["publish", "nabcdef123456", "--yes", "--membership", "p1", "--hide-from-profile"], { client, publish: pub.publish }));
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(pub.calls[0].payload.circle_permissions, [{ kind: "circle_plan", keys: ["p1"] }]);
+  assert.equal(pub.calls[0].payload.exclude_from_creator_top, true);
+  assert.equal(pub.calls[0].payload.slug, "slug-nabcdef123456");
 });

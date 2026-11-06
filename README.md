@@ -2,12 +2,12 @@
 
 A CLI and agent plugin for [note.com](https://note.com) built on its **unofficial** API, made to be driven by AI coding agents such as Claude Code, Codex, Cursor and Gemini CLI. Every command prints JSON.
 
-- **Drafts**: convert Markdown to note's editor HTML and save it as a draft, uploading local images and the eyecatch.
-- **Publishing**: publish with hashtags, price and paywall, table of contents and magazines; schedule posts; take articles down or delete them.
+- **Drafts**: convert Markdown (Obsidian syntax too) to note's editor HTML and save it as a draft, uploading local images and the eyecatch; URLs on their own line become embeds (YouTube, X, note articles, link cards, ...) and linked local files become download attachments.
+- **Publishing**: publish with hashtags, price and paywall, table of contents, magazines and membership plans; schedule posts; take articles down or delete them.
 - **Engagement**: like, comment, follow, add articles to your magazines, and check notifications and memberships.
 - **Research**: search articles, creators, magazines and hashtags; browse hashtags, categories, magazines and contests; read article text, likes and comments.
 - **Analysis**: like-count distribution, paid ratio, title patterns, posting weekday/hour, top authors and articles.
-- **Your stats**: page views, likes and comments per article.
+- **Your stats**: the dashboard's numbers (page views, impressions, likes, comments, sales) in total, per article, over time and by referrer.
 
 > ⚠️ This is not an official note.com API. It can break without notice. Keep usage personal and low-volume, and follow note.com's terms of service.
 
@@ -148,7 +148,7 @@ bun add -g github:shoot16625/note-cli
 | `note-cli:publish` | Publish, schedule, unpublish and delete articles; manage magazines |
 | `note-cli:engage` | Like, comment, follow; notifications and memberships |
 | `note-cli:research` | Search and analyze articles, hashtags and creators |
-| `note-cli:my-stats` | Review your own page views, likes and comments |
+| `note-cli:my-stats` | Review your dashboard: views, impressions, likes, sales, referrers |
 
 Examples: "save `post.md` to note as a draft", "publish it with the hashtags AI and ClaudeCode", or "what kind of note articles about Claude Code get the most likes?"
 
@@ -174,15 +174,16 @@ Your note account must have a verified email address before it can create drafts
 
 ```bash
 # Drafts (login required)
-note-cli draft create article.md [--title T] [--eyecatch cover.png] [--dry-run]
-note-cli draft update <id|key|url> article.md [--eyecatch cover.png]
+note-cli draft create article.md [--title T] [--eyecatch cover.png] [--no-embed] [--dry-run]
+note-cli draft update <key|url> article.md [--eyecatch cover.png] [--no-embed]
 note-cli draft get <key|url> [--html] [--max-chars N]
 note-cli draft list [--page N] [--status draft|published]
 note-cli draft delete <id|key|url> --yes
 
 # Publishing (login required; opens a browser window briefly, see below)
 note-cli publish <key|url> [article.md] --yes [--hashtag T]... [--price YEN] [--refund] [--magazine KEY]... \
-    [--toc] [--disable-comments] [--no-notify] [--schedule 2026-12-01T09:00+09:00] [--eyecatch cover.png] [--dry-run]
+    [--membership all|none|PLAN]... [--toc] [--disable-comments] [--no-notify] [--hide-from-profile] \
+    [--schedule 2026-12-01T09:00+09:00] [--eyecatch cover.png] [--dry-run]
 note-cli reserved                               # scheduled articles
 note-cli unpublish <key|url> --yes              # back to draft (cancels a scheduled post too)
 note-cli delete <key|url> --yes                 # delete; published articles are unpublished first
@@ -213,12 +214,15 @@ note-cli contests [--state opened|closed|finished|all] [--type contest|theme|all
 note-cli analyze search "<query>" [--sort ...] [--limit 100] [--top 10]
 note-cli analyze hashtag <tag> [--order ...] [--limit 100]
 note-cli analyze user <urlname> [--limit 100]
+note-cli stats dashboard [--period 7d|28d|365d|all|this-month|last-month|custom] [--from D --to D] \
+    [--order pv|impressions|likes|comments|sales|published] [--limit N]   # login required
+note-cli stats chart [--metric pv|impressions|likes|comments|sales] [--period ...]          # login required
 note-cli stats pv [--filter all|daily|weekly|monthly|yearly] [--sort pv|like|comment] [--page N]   # login required
 ```
 
 Article bodies are cut at 20,000 characters by default (`--max-chars 0` for no limit); the output reports `bodyChars` and `truncated`. List outputs report `exhausted`, plus `skipped` when rows could not be read, which usually means the unofficial API changed.
 
-Identifiers are validated before any request: note keys (`n...`) or note URLs, urlnames (letters, digits, `_`, `-`), and hashtags without `/ \ ? # %` or whitespace.
+Identifiers are validated before any request: note keys (`n...`) or note URLs, urlnames (letters, digits, `_`, `-`), and hashtags without `/ \ ? # % .` or whitespace (note silently drops every hashtag of an article when one contains a dot or space).
 
 Errors go to stderr as `{"error": {"code", "message", ...}}`. The exit code is 1 for errors and 2 for usage mistakes. `FORBIDDEN` means note refused the action and gives its reason; `AUTH_ERROR` means the session has expired.
 
@@ -230,6 +234,7 @@ note requires reCAPTCHA v3 to publish, which a plain HTTP client cannot pass. `p
 - A line containing only `<!-- paywall -->` marks where the paid part starts. It takes effect with `--price` (100–50000 yen), which requires it.
 - `--dry-run` prints the title, hashtags, price and the free/paid lengths without opening a browser.
 - Scheduled posts (`--schedule`) and turning comments off need note premium. note refuses them otherwise, and the CLI reports `FORBIDDEN`.
+- `--membership all` makes the article readable by every member of your membership, `--membership <planKey>` by those plans only, and `--membership none` takes it out.
 - Paid articles, articles that ever sold, and articles in paid or membership magazines cannot be unpublished or deleted.
 - Commenting may first require accepting note's comment guidelines once in a browser (`COMMENT_GUIDELINES`).
 
@@ -245,6 +250,9 @@ note requires reCAPTCHA v3 to publish, which a plain HTTP client cannot pass. `p
 | Links | Kept for `http`, `https` and `mailto`; other schemes are dropped, keeping the link text, with a warning |
 | Images with a local path (`![alt](img/a.png "caption")`) | Uploaded to note and embedded as an image block; the title becomes the caption. PNG, JPEG, GIF or WebP, up to 10 MB |
 | Images with a URL | Replaced with a link, with a warning (download the file and reference it locally to embed it) |
+| A bare URL alone on its line | An embed, chosen the way the editor does: YouTube, Vimeo, niconico, X posts and profiles, note articles, GitHub, Spotify, Speaker Deck, Google Maps/Slides/Forms, Bluesky, Threads and more; other pages become link cards. `--no-embed` keeps the link |
+| `[label](file.pdf)` alone on its line (a local file) | A download attachment (up to 100 MB) |
+| Obsidian `![[img.png]]`, `[[Page\|label]]`, `==text==` | Image, plain text, bold |
 | Tables | **Not supported by note**: rendered as a code block, with a warning |
 
 The title comes from `--title`, then frontmatter `title:`, then a leading `# Heading`, which is removed from the body.

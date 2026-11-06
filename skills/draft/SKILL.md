@@ -1,6 +1,6 @@
 ---
 name: draft
-description: Save Markdown articles to note.com as drafts, uploading local images and the eyecatch, with the bundled note-cli. Use when the user wants to put an article on note / note.com, save or update a note draft, or read back a draft they are editing. For publishing, use note-cli:publish.
+description: Save Markdown articles to note.com as drafts, uploading local images and the eyecatch and turning URLs into embeds (YouTube, X, note articles, link cards) and local files into download attachments, with the bundled note-cli. Use when the user wants to put an article on note / note.com, save or update a note draft, or read back a draft they are editing. For publishing, use note-cli:publish.
 ---
 
 # note-cli:draft
@@ -31,8 +31,8 @@ Output is JSON on stdout. Errors are JSON on stderr (`{"error": {"code", "messag
 
 ```bash
 note-cli draft create article.md --dry-run   # preview converted HTML, images + warnings, no network
-note-cli draft create article.md [--eyecatch cover.png]   # -> {id, key, editUrl, images, eyecatch, warnings}
-note-cli draft update <id|key|url> article.md [--eyecatch cover.png]  # overwrite title + body of an existing draft
+note-cli draft create article.md [--eyecatch cover.png] [--no-embed]   # -> {id, key, editUrl, images, embeds, eyecatch, warnings}
+note-cli draft update <key|url> article.md [--eyecatch cover.png]  # overwrite title + body of an existing draft (use the key: embeds need it)
 note-cli draft get <key|url>                 # read a draft back as text (--html for raw, --max-chars N, default 20000)
 note-cli draft list --status draft           # your drafts (page 1; --page N)
 note-cli draft delete <id|key> --yes         # drafts only (published: `note-cli delete`); ask the user before running
@@ -45,6 +45,9 @@ note-cli draft delete <id|key> --yes         # drafts only (published: `note-cli
 - Lists, quotes, code blocks, bold/italic/strike, links, horizontal rules work.
 - **Local images** (`![alt](img/a.png "caption")`, path relative to the Markdown file) are uploaded and embedded as image blocks; the optional title becomes the caption. PNG/JPEG/GIF/WebP, ≤ 10 MB. Put each image on its own line.
 - **Image URLs are not uploaded** (they become links, with a warning). To embed one, download it and reference the local file.
+- **Embeds**: a URL alone on its own line (a bare URL, not `[text](url)`) becomes an embed, like pasting it into the editor: YouTube/Vimeo/niconico players, X posts and profiles, note articles as cards, GitHub, Spotify, Speaker Deck, Google Maps/Slides/Forms, Bluesky, Threads and more; any other page becomes a link card. `--no-embed` keeps them as plain links. If note cannot fetch a URL, it stays a link and `warnings` says so.
+- **Attachments**: a link to a local file alone on its own line (`[資料](files/guide.pdf)`) uploads the file as a download attachment (≤ 100 MB). Relative to the Markdown file.
+- **Obsidian syntax**: `![[image.png]]` / `![[image.png|alt]]` are images, `[[Page|label]]` becomes its text, `==highlight==` becomes bold.
 - **Tables become code blocks**, with a warning.
 - **Eyecatch** (cover image): `--eyecatch <file>` or frontmatter `eyecatch: cover.png`. note only accepts a **1280:670** aspect ratio (e.g. 1280x670); `--dry-run` warns about other sizes. If note rejects it, the draft is still saved, `eyecatch.set` is false, and `warnings` explains why. Fix the image and rerun `draft update` with `--eyecatch`.
 - A line containing only `<!-- paywall -->` marks where the paid part of a paid article starts (it shows as the paywall line in the editor).
@@ -54,7 +57,7 @@ note-cli draft delete <id|key> --yes         # drafts only (published: `note-cli
 
 1. Write or edit the Markdown file with the user.
 2. Run with `--dry-run` once: it checks that every referenced image exists and is supported. Relay any `warnings`.
-3. Run `draft create` (or `draft update` with the id returned before — keep it so later edits update the same draft instead of creating duplicates).
+3. Run `draft create` (or `draft update` with the key returned before — keep it so later edits update the same draft instead of creating duplicates).
 4. Give the user the `editUrl`. If they want it public, follow `note-cli:publish`.
 
 On `AUTH_ERROR` the session has expired: log in again as described above. An `API_ERROR` with `email_activation` means the account has not verified its email address yet.
