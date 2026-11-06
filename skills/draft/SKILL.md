@@ -1,6 +1,6 @@
 ---
 name: draft
-description: Save Markdown articles to note.com as drafts, uploading local images and the eyecatch and turning URLs into embeds (YouTube, X, note articles, link cards) and local files into download attachments, with the bundled note-cli. Use when the user wants to put an article on note / note.com, save or update a note draft, or read back a draft they are editing. For publishing, use note-cli:publish.
+description: Save, update or read note.com drafts from Markdown (images, eyecatch, embeds, attachments).
 ---
 
 # note-cli:draft

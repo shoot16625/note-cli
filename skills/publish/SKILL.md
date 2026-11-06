@@ -1,6 +1,6 @@
 ---
 name: publish
-description: Publish, schedule, take down or delete note.com articles and manage which magazines they are in, with the bundled note-cli. Use when the user wants to make a note article public, set hashtags / price / paywall / table of contents, schedule a post, re-publish an edited article, turn an article back into a draft, delete a published article, or add an article to a magazine.
+description: Publish, schedule, unpublish or delete note.com articles; hashtags, price, paywall, magazines.
 ---
 
 # note-cli:publish
