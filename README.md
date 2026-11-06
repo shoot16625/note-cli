@@ -1,6 +1,6 @@
 # note-cli
 
-A CLI and agent plugin for [note.com](https://note.com) built on its **unofficial** API, made to be driven by Claude Code and Codex. Every command prints JSON.
+A CLI and agent plugin for [note.com](https://note.com) built on its **unofficial** API, made to be driven by AI coding agents such as Claude Code, Codex, Cursor and Gemini CLI. Every command prints JSON.
 
 - **Drafts**: convert Markdown to note's editor HTML and save it as a draft. It never publishes.
 - **Research**: search articles, list a hashtag's or a creator's articles, and read article text.
@@ -19,6 +19,23 @@ The plugin bundles the CLI as a single dependency-free file (`dist/note-cli.js`)
 curl -fsSL https://bun.sh/install | bash
 ```
 
+Installation differs by agent. If you use more than one, install note-cli separately for each.
+
+| Agent | Install |
+|---|---|
+| [Claude Code](#claude-code) | `/plugin marketplace add shoot16625/note-cli` |
+| [Codex](#codex) | `codex plugin marketplace add shoot16625/note-cli` |
+| [Cursor](#cursor) | `/add-plugin` from this repository |
+| [Gemini CLI](#gemini-cli) | `gemini extensions install https://github.com/shoot16625/note-cli` |
+| [GitHub Copilot CLI](#github-copilot-cli) | `copilot plugin marketplace add shoot16625/note-cli` |
+| [Factory Droid](#factory-droid) | `droid plugin marketplace add https://github.com/shoot16625/note-cli` |
+| [Qwen Code](#qwen-code) | `qwen extensions install shoot16625/note-cli` |
+| [Devin CLI](#devin-cli) | `devin plugins install shoot16625/note-cli` |
+| [Kimi Code](#kimi-code) | `/plugins install https://github.com/shoot16625/note-cli` |
+| [Antigravity](#antigravity) | `agy plugin install https://github.com/shoot16625/note-cli` |
+| [Pi](#pi) | `pi install git:github.com/shoot16625/note-cli` |
+| [Anything else](#other-agents-opencode-windsurf-cline-) | `npx skills add shoot16625/note-cli` |
+
 ### Claude Code
 
 ```text
@@ -33,6 +50,85 @@ codex plugin marketplace add shoot16625/note-cli
 ```
 
 Then open `/plugins` (CLI) or **Plugins** in the sidebar (app) and install **note-cli**.
+
+### Cursor
+
+In Cursor Agent chat:
+
+```text
+/add-plugin https://github.com/shoot16625/note-cli
+```
+
+### Gemini CLI
+
+```bash
+gemini extensions install https://github.com/shoot16625/note-cli
+gemini extensions update note-cli   # later
+```
+
+### GitHub Copilot CLI
+
+```bash
+copilot plugin marketplace add shoot16625/note-cli
+copilot plugin install note-cli@note-cli
+```
+
+### Factory Droid
+
+```bash
+droid plugin marketplace add https://github.com/shoot16625/note-cli
+droid plugin install note-cli@note-cli
+```
+
+### Qwen Code
+
+Qwen Code installs plugins from Claude Code marketplaces directly. Pick `note-cli` when prompted:
+
+```bash
+qwen extensions install shoot16625/note-cli
+qwen extensions update note-cli   # later
+```
+
+### Devin CLI
+
+```bash
+devin plugins install shoot16625/note-cli
+devin plugins update note-cli   # later
+```
+
+### Kimi Code
+
+```text
+/plugins install https://github.com/shoot16625/note-cli
+```
+
+### Antigravity
+
+```bash
+agy plugin install https://github.com/shoot16625/note-cli
+```
+
+Reinstall with the same command to update.
+
+### Pi
+
+```bash
+pi install git:github.com/shoot16625/note-cli
+```
+
+### Other agents (OpenCode, Windsurf, Cline, ...)
+
+Any agent that reads `SKILL.md` skills can install them with the [`skills`](https://github.com/vercel-labs/skills) CLI, which asks which agents to install for:
+
+```bash
+npx skills add shoot16625/note-cli
+```
+
+This copies only the skills, not the bundled CLI, so also install the CLI (the skills will offer to do it on first use):
+
+```bash
+bun add -g github:shoot16625/note-cli
+```
 
 ### CLI only (optional)
 
@@ -146,3 +242,8 @@ Repository layout:
 - `skills/`: plugin skills
 - `.claude-plugin/`: Claude Code plugin and marketplace manifests
 - `.codex-plugin/` and `.agents/plugins/`: Codex plugin and marketplace manifests
+- `.cursor-plugin/`, `.devin-plugin/`, `.kimi-plugin/`, `.antigravity-plugin/`: plugin manifests for those agents
+- `gemini-extension.json` and `GEMINI.md`: Gemini CLI extension
+- `package.json` `pi` field: Pi package
+
+Copilot CLI, Factory Droid and Qwen Code read `.claude-plugin/`. When bumping the version, update every manifest; `test/manifests.test.ts` checks they match `package.json`.
