@@ -1,0 +1,12 @@
+{
+  "name": "note-cli",
+  "version": "0.1.0",
+  "description": "Draft, search and analyze note.com articles from AI coding agents via a bundled unofficial-API CLI",
+  "author": {
+    "name": "uchidash"
+  },
+  "license": "MIT",
+  "keywords": ["note", "note.com", "writing", "analytics"],
+  "homepage": "https://github.com/shoot16625/note-cli",
+  "repository": "https://github.com/shoot16625/note-cli"
+}

@@ -1,11 +1,26 @@
 {
   "name": "note-cli",
   "version": "0.1.0",
-  "description": "Unofficial note.com CLI for drafting, searching and analyzing articles (for Claude Code / Codex)",
+  "description": "Unofficial note.com CLI for drafting, searching and analyzing articles (for Claude Code, Codex and other AI coding agents)",
   "type": "module",
   "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "note",
+    "note.com",
+    "skills",
+    "claude-code",
+    "codex",
+    "gemini-cli",
+    "cursor"
+  ],
   "bin": {
     "note-cli": "dist/note-cli.js"
+  },
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
   },
   "engines": {
     "bun": ">=1.2"
@@ -20,9 +35,15 @@
   "files": [
     "dist",
     "skills",
+    "GEMINI.md",
+    "gemini-extension.json",
     ".claude-plugin",
     ".codex-plugin",
-    ".agents"
+    ".agents",
+    ".cursor-plugin",
+    ".devin-plugin",
+    ".kimi-plugin",
+    ".antigravity-plugin"
   ],
   "dependencies": {
     "marked": "^18.1.3"
