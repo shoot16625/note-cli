@@ -1,11 +1,24 @@
 ---
 name: my-stats
-description: Look at the logged-in user's own note.com numbers (page views, likes, comments per article) with the local note-cli. Use when the user asks how their note articles are doing, which posts get the most views, or wants to review their note performance.
+description: Look at the logged-in user's own note.com numbers (page views, likes, comments per article) with the bundled note-cli. Use when the user asks how their note articles are doing, which posts get the most views, or wants to review their note performance.
 ---
 
 # note-cli:my-stats
 
 Read the user's own note.com statistics through the unofficial API wrapper `note-cli`. Requires login.
+
+## Running note-cli
+
+This skill ships with the CLI. This file lives at `<plugin root>/skills/<skill>/SKILL.md`; the CLI is a dependency-free bundle at `<plugin root>/dist/note-cli.js` (Node.js 22+).
+
+- If `note-cli` is on PATH, use it.
+- Otherwise run `node <plugin root>/dist/note-cli.js ...` with the absolute path. Below, `note-cli` means whichever of these works.
+
+Output is JSON on stdout. Errors are JSON on stderr (`{"error": {"code", "message"}}`) with exit code 1 (2 for usage errors). Codes: `NOT_LOGGED_IN`, `AUTH_ERROR`, `NOT_FOUND`, `RATE_LIMITED`, `API_ERROR`, `USAGE`.
+
+## Login (only for commands that need it)
+
+`note-cli auth status` tells you whether a session exists. To log in, run `note-cli auth login` yourself with a command timeout of at least 300 seconds. It opens a Chrome/Edge/Chromium window on the note.com login page and waits for the user to finish logging in there. Tell the user to log in in that window. Never ask for their password. If no browser is found, pass `--browser <path>`, or have the user copy the `Cookie` request header from DevTools and pipe it to `note-cli auth import`.
 
 ## Commands
 
@@ -18,7 +31,7 @@ note-cli draft list                                   # own articles incl. draft
 
 `stats pv` returns note's raw response (per-article `read_count`, likes, comments plus totals). It is page-based (`--page N`); the response shape is unofficial, so inspect it before summarizing.
 
-If not logged in or on `AUTH_ERROR`, ask the user to run `! note-cli auth login`.
+If not logged in, or on `AUTH_ERROR`, log in as described above.
 
 ## Reporting
 

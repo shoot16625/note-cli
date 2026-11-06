@@ -25,11 +25,22 @@ const SORTS = ["popular", "hot", "new"];
 const COMMANDS: Record<string, Command> = {
   // ---------------- auth ----------------
   "auth login": {
-    usage: "auth login [--timeout <sec>] [--channel chrome|msedge|chromium]",
+    usage: "auth login [--timeout <sec>] [--browser <path to Chrome/Edge/Chromium>]",
     summary: "Open a browser, log in to note.com by hand, and save the session cookies",
-    options: { timeout: { type: "string", default: "300" }, channel: { type: "string", default: "chrome" } },
+    options: { timeout: { type: "string", default: "300" }, browser: { type: "string" } },
     async run({ values }) {
-      const cookies = await browserLogin({ timeoutSec: int(values.timeout, "timeout"), channel: String(values.channel) });
+      const cookies = await browserLogin({
+        timeoutSec: int(values.timeout, "timeout"),
+        browser: typeof values.browser === "string" ? values.browser : undefined,
+        isLoggedIn: async (c) => {
+          try {
+            await api.currentUser(new NoteClient({ session: { cookies: c, savedAt: "probe" } }));
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      });
       return finishLogin(cookies);
     },
   },
