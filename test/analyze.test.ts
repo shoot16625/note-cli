@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "bun:test";
 import { analyzeNotes, numberStats } from "../src/analyze.ts";
 import { normalizeNote } from "../src/normalize.ts";
 

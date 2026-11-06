@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "bun:test";
 import { main, noteKey } from "../src/cli.ts";
 import { NoteClient } from "../src/client.ts";
 import { parseCookieHeader } from "../src/session.ts";

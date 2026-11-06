@@ -9,10 +9,10 @@ Save articles to note.com **as drafts only** through the unofficial API wrapper 
 
 ## Running note-cli
 
-This skill ships with the CLI. This file lives at `<plugin root>/skills/<skill>/SKILL.md`; the CLI is a dependency-free bundle at `<plugin root>/dist/note-cli.js` (Node.js 22+).
+This skill ships with the CLI. This file lives at `<plugin root>/skills/<skill>/SKILL.md`; the CLI is a dependency-free bundle at `<plugin root>/dist/note-cli.js` (requires [Bun](https://bun.sh)).
 
 - If `note-cli` is on PATH, use it.
-- Otherwise run `node <plugin root>/dist/note-cli.js ...` with the absolute path. Below, `note-cli` means whichever of these works.
+- Otherwise run `bun <plugin root>/dist/note-cli.js ...` with the absolute path. If `bun` is missing, ask the user to install it (`curl -fsSL https://bun.sh/install | bash`). Below, `note-cli` means whichever of these works.
 
 Output is JSON on stdout. Errors are JSON on stderr (`{"error": {"code", "message"}}`) with exit code 1 (2 for usage errors). Codes: `NOT_LOGGED_IN`, `AUTH_ERROR`, `NOT_FOUND`, `RATE_LIMITED`, `API_ERROR`, `USAGE`.
 

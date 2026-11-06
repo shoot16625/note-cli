@@ -13,7 +13,11 @@ References: [shimayuz/note-com-mcp](https://github.com/shimayuz/note-com-mcp), [
 
 ## Install
 
-The plugin bundles the CLI as a single dependency-free file (`dist/note-cli.js`). The only requirement is Node.js 22 or later.
+The plugin bundles the CLI as a single dependency-free file (`dist/note-cli.js`). The only requirement is [Bun](https://bun.sh) 1.2 or later:
+
+```bash
+curl -fsSL https://bun.sh/install | bash
+```
 
 ### Claude Code
 
@@ -35,7 +39,7 @@ Then open `/plugins` (CLI) or **Plugins** in the sidebar (app) and install **not
 To use `note-cli` directly in your shell:
 
 ```bash
-npm install -g github:shoot16625/note-cli
+bun add -g github:shoot16625/note-cli
 ```
 
 ## Skills
@@ -124,10 +128,10 @@ The title comes from `--title`, then frontmatter `title:`, then a leading `# Hea
 ## Development
 
 ```bash
-npm install
-npm run dev -- search "Claude Code"   # run from source (Node 23.6+ strips TypeScript types)
-npm run build                         # bundle src/ into dist/note-cli.js (commit the result)
-npm run check                         # typecheck, tests, build, and a check that dist/ is up to date
+bun install
+bun run dev search "Claude Code"   # run from source
+bun run build                      # bundle src/ into dist/note-cli.js (commit the result)
+bun run check                      # typecheck, tests, build, and a check that dist/ is up to date
 ```
 
 Repository layout:
