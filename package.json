@@ -1,6 +1,6 @@
 {
   "name": "note-cli",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Unofficial note.com CLI for writing, publishing, researching and engaging on note.com (for Claude Code, Codex and other AI coding agents)",
   "type": "module",
   "license": "MIT",
