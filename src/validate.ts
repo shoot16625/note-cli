@@ -36,3 +36,30 @@ export function hashtag(input: string): string {
   }
   return name;
 }
+
+const MAGAZINE_KEY = /^m[0-9a-z]{6,32}$/;
+
+/** A magazine key (`m...`) or a magazine URL (https://note.com/<urlname>/m/<key>). */
+export function magazineKey(input: string): string {
+  const s = input.trim();
+  const fromUrl = s.match(/\/m\/(m[0-9a-z]{6,32})(?:[/?#]|$)/)?.[1];
+  const key = fromUrl ?? s;
+  if (!MAGAZINE_KEY.test(key)) {
+    throw new CliError("USAGE", `Not a magazine key or URL: "${input}". Expected something like m97e554a23b24.`);
+  }
+  return key;
+}
+
+/** A category slug as listed by `categories` (e.g. tech, column), or `featured`. */
+export function categorySlug(input: string): string {
+  const s = input.trim().toLowerCase();
+  if (!/^[a-z][a-z0-9_-]{0,40}$/.test(s)) throw new CliError("USAGE", `Not a category slug: "${input}". Run \`note-cli categories\`.`);
+  return s;
+}
+
+/** An opaque key from note (comment keys and the like): letters, digits, _ and - only. */
+export function token(input: string, what: string): string {
+  const s = input.trim();
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(s)) throw new CliError("USAGE", `Not a valid ${what}: "${input}".`);
+  return s;
+}

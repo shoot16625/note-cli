@@ -2,8 +2,10 @@
 
 A CLI and agent plugin for [note.com](https://note.com) built on its **unofficial** API, made to be driven by AI coding agents such as Claude Code, Codex, Cursor and Gemini CLI. Every command prints JSON.
 
-- **Drafts**: convert Markdown to note's editor HTML and save it as a draft. It never publishes.
-- **Research**: search articles, list a hashtag's or a creator's articles, and read article text.
+- **Drafts**: convert Markdown to note's editor HTML and save it as a draft, uploading local images and the eyecatch.
+- **Publishing**: publish with hashtags, price and paywall, table of contents and magazines; schedule posts; take articles down or delete them.
+- **Engagement**: like, comment, follow, add articles to your magazines, and check notifications and memberships.
+- **Research**: search articles, creators, magazines and hashtags; browse hashtags, categories, magazines and contests; read article text, likes and comments.
 - **Analysis**: like-count distribution, paid ratio, title patterns, posting weekday/hour, top authors and articles.
 - **Your stats**: page views, likes and comments per article.
 
@@ -143,10 +145,12 @@ bun add -g github:shoot16625/note-cli
 | Skill | What it does |
 |---|---|
 | `note-cli:draft` | Save, update and read back Markdown drafts |
+| `note-cli:publish` | Publish, schedule, unpublish and delete articles; manage magazines |
+| `note-cli:engage` | Like, comment, follow; notifications and memberships |
 | `note-cli:research` | Search and analyze articles, hashtags and creators |
 | `note-cli:my-stats` | Review your own page views, likes and comments |
 
-Examples: "save `post.md` to note as a draft" or "what kind of note articles about Claude Code get the most likes?"
+Examples: "save `post.md` to note as a draft", "publish it with the hashtags AI and ClaudeCode", or "what kind of note articles about Claude Code get the most likes?"
 
 ## Login
 
@@ -170,17 +174,40 @@ Your note account must have a verified email address before it can create drafts
 
 ```bash
 # Drafts (login required)
-note-cli draft create article.md [--title T] [--dry-run]
-note-cli draft update <id|key|url> article.md
+note-cli draft create article.md [--title T] [--eyecatch cover.png] [--dry-run]
+note-cli draft update <id|key|url> article.md [--eyecatch cover.png]
 note-cli draft get <key|url> [--html] [--max-chars N]
 note-cli draft list [--page N] [--status draft|published]
 note-cli draft delete <id|key|url> --yes
 
+# Publishing (login required; opens a browser window briefly, see below)
+note-cli publish <key|url> [article.md] --yes [--hashtag T]... [--price YEN] [--refund] [--magazine KEY]... \
+    [--toc] [--disable-comments] [--no-notify] [--schedule 2026-12-01T09:00+09:00] [--eyecatch cover.png] [--dry-run]
+note-cli reserved                               # scheduled articles
+note-cli unpublish <key|url> --yes              # back to draft (cancels a scheduled post too)
+note-cli delete <key|url> --yes                 # delete; published articles are unpublished first
+note-cli magazines [--note <key>]               # your magazines
+note-cli magazine add|remove <magazineKey> <noteKey>
+
+# Engagement (login required)
+note-cli like|unlike <key|url>
+note-cli comment <key|url> "text" [--reply-to <commentKey>]
+note-cli comment delete <key|url> <commentKey> --yes
+note-cli follow|unfollow <urlname>
+note-cli notices                                # unread counts
+note-cli membership plans|joined
+
 # Research (no login)
-note-cli search "<query>" [--sort popular|hot|new] [--limit N] [--start N]
-note-cli hashtag <tag> [--order popular|hot|new] [--limit N] [--paid-only]
+note-cli search "<query>" [--type note|user|magazine|hashtag] [--sort popular|hot|new] [--limit N] [--start N]
+note-cli hashtag <tag> [--order popular|hot|new] [--limit N] [--paid-only]   # also article count + related tags
 note-cli user <urlname> [--limit N]
 note-cli note <key|url> [--html] [--max-chars N]
+note-cli likes <key|url> [--limit N]            # who liked an article
+note-cli comments <key|url> [--limit N]         # top-level comments with reply counts
+note-cli magazine <key|url> [--limit N]         # magazine details + its articles
+note-cli categories                             # category slugs
+note-cli category <slug> [--sort new|trend] [--limit N]   # `featured` = note's editorial pick
+note-cli contests [--state opened|closed|finished|all] [--type contest|theme|all] [--limit N]
 
 # Analysis
 note-cli analyze search "<query>" [--sort ...] [--limit 100] [--top 10]
@@ -193,7 +220,18 @@ Article bodies are cut at 20,000 characters by default (`--max-chars 0` for no l
 
 Identifiers are validated before any request: note keys (`n...`) or note URLs, urlnames (letters, digits, `_`, `-`), and hashtags without `/ \ ? # %` or whitespace.
 
-Errors go to stderr as `{"error": {"code", "message", ...}}`. The exit code is 1 for errors and 2 for usage mistakes.
+Errors go to stderr as `{"error": {"code", "message", ...}}`. The exit code is 1 for errors and 2 for usage mistakes. `FORBIDDEN` means note refused the action and gives its reason; `AUTH_ERROR` means the session has expired.
+
+### Publishing
+
+note requires reCAPTCHA v3 to publish, which a plain HTTP client cannot pass. `publish` opens Chrome/Edge/Chromium with a throwaway profile, copies the saved session into it, and sends note's own publish request from inside the editor page. The window closes when it is done. Nothing needs to be clicked. Use `--browser` (or `NOTE_CLI_BROWSER`) if no browser is found.
+
+- `publish` needs an existing draft. With a Markdown file, the file is saved to the draft first.
+- A line containing only `<!-- paywall -->` marks where the paid part starts. It takes effect with `--price` (100–50000 yen), which requires it.
+- `--dry-run` prints the title, hashtags, price and the free/paid lengths without opening a browser.
+- Scheduled posts (`--schedule`) and turning comments off need note premium. note refuses them otherwise, and the CLI reports `FORBIDDEN`.
+- Paid articles, articles that ever sold, and articles in paid or membership magazines cannot be unpublished or deleted.
+- Commenting may first require accepting note's comment guidelines once in a browser (`COMMENT_GUIDELINES`).
 
 ### Markdown conversion
 
@@ -205,10 +243,13 @@ Errors go to stderr as `{"error": {"code", "message", ...}}`. The exit code is 1
 | Line break inside a paragraph | Line break (`<br>`) |
 | Lists, quotes, code blocks, bold, strikethrough, horizontal rules | Kept as is |
 | Links | Kept for `http`, `https` and `mailto`; other schemes are dropped, keeping the link text, with a warning |
-| Images | **Not supported yet**: replaced with a link, with a warning |
+| Images with a local path (`![alt](img/a.png "caption")`) | Uploaded to note and embedded as an image block; the title becomes the caption. PNG, JPEG, GIF or WebP, up to 10 MB |
+| Images with a URL | Replaced with a link, with a warning (download the file and reference it locally to embed it) |
 | Tables | **Not supported by note**: rendered as a code block, with a warning |
 
 The title comes from `--title`, then frontmatter `title:`, then a leading `# Heading`, which is removed from the body.
+
+Image paths are relative to the Markdown file (the current directory when reading stdin). An image used more than once is uploaded once. The eyecatch (cover image) comes from `--eyecatch` (relative to the current directory) or frontmatter `eyecatch:` (relative to the Markdown file). note only accepts eyecatches with a 1280:670 aspect ratio, such as 1280x670. `--dry-run` reads and checks every image without uploading anything. If note rejects the eyecatch, the draft is still saved and the output carries a warning.
 
 ### Environment variables
 
@@ -216,15 +257,14 @@ The title comes from `--title`, then frontmatter `title:`, then a leading `# Hea
 |---|---|
 | `NOTE_COOKIE` | Cookie header string. Overrides the saved session |
 | `NOTE_CLI_HOME` | Directory where the session is stored |
-| `NOTE_CLI_BROWSER` | Browser executable used by `auth login` |
+| `NOTE_CLI_BROWSER` | Browser executable used by `auth login` and `publish` |
 | `NOTE_CLI_INTERVAL_MS` | Minimum delay between requests (default 500 ms) |
 | `NOTE_CLI_DEBUG` | Log request URLs to stderr |
 
 ## Not supported yet
 
-- Image upload (body images and eyecatch)
-- Publishing, scheduled posts, hashtags and price (`PUT /api/v1/text_notes/{id}`)
 - The GraphQL dashboard (impressions, referrers)
+- Creating or editing magazines and membership plans, sales and payouts
 
 ## Development
 

@@ -22,6 +22,8 @@ export interface RequestOptions {
   method?: "GET" | "POST" | "PUT" | "DELETE";
   query?: Record<string, string | number | boolean | undefined>;
   json?: unknown;
+  /** multipart/form-data body (image uploads). */
+  form?: FormData;
   /** Send session cookies. "required" fails fast when not logged in. */
   auth?: "none" | "optional" | "required";
   /** Mimic requests from the editor (needed for draft APIs). */
@@ -82,10 +84,13 @@ export class NoteClient {
       headers["X-Requested-With"] = "XMLHttpRequest";
     }
 
-    let body: string | undefined;
+    let body: string | FormData | undefined;
     if (opts.json !== undefined) {
       headers["Content-Type"] = "application/json";
       body = JSON.stringify(opts.json);
+    } else if (opts.form) {
+      // fetch sets the multipart Content-Type (with boundary) itself.
+      body = opts.form;
     }
 
     await this.throttle();
@@ -109,24 +114,51 @@ export class NoteClient {
     }
 
     if (!res.ok) {
+      const apiMessage = errorMessage(data);
+      // A 403 that explains itself is a refusal (paid article, premium feature, guidelines), not an expired session.
       const code =
-        res.status === 401 || res.status === 403
+        res.status === 401 || (res.status === 403 && !apiMessage)
           ? "AUTH_ERROR"
-          : res.status === 404
-            ? "NOT_FOUND"
-            : res.status === 429
-              ? "RATE_LIMITED"
-              : "API_ERROR";
+          : res.status === 403
+            ? "FORBIDDEN"
+            : res.status === 404
+              ? "NOT_FOUND"
+              : res.status === 429
+                ? "RATE_LIMITED"
+                : "API_ERROR";
       const hint =
         code === "AUTH_ERROR" ? " Session may be expired; run `note-cli auth login` again." : "";
-      const apiMessage = (data as any)?.error?.message;
-      const suffix = typeof apiMessage === "string" ? ` ${apiMessage}` : "";
+      const suffix = apiMessage ? ` ${apiMessage}` : "";
       throw new CliError(code, `${method} ${url.pathname} -> HTTP ${res.status}.${suffix}${hint}`, {
         status: res.status,
         detail: typeof data === "string" ? data.slice(0, 500) : data,
       });
     }
     return data as T;
+  }
+
+  /**
+   * POST a form to a third-party URL (an S3 presigned upload). No cookies or note headers are sent.
+   */
+  async postForm(url: string, form: FormData): Promise<Response> {
+    const target = new URL(url);
+    if (target.protocol !== "https:") throw new CliError("API_ERROR", `Refusing to upload to a non-https URL: ${url}`);
+    await this.throttle();
+    if (process.env.NOTE_CLI_DEBUG) console.error(`[note-cli] POST ${target.origin}${target.pathname}`);
+    let res: Response;
+    try {
+      res = await this.fetchImpl(target, { method: "POST", body: form });
+    } catch (e) {
+      throw new CliError("NETWORK_ERROR", `Upload failed: ${(e as Error).message}`);
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new CliError("API_ERROR", `Image upload to storage failed: HTTP ${res.status}.`, {
+        status: res.status,
+        detail: text.slice(0, 500),
+      });
+    }
+    return res;
   }
 
   private async throttle(): Promise<void> {
@@ -142,4 +174,14 @@ function safeDecode(v: string): string {
   } catch {
     return v;
   }
+}
+
+/** Pull a human-readable message out of note's various error shapes. */
+function errorMessage(data: unknown): string | null {
+  const d = data as any;
+  const raw = [d?.error?.message, d?.message, typeof d?.data === "string" ? d.data : null].find(
+    (m) => typeof m === "string" && m.trim(),
+  );
+  if (!raw) return null;
+  return raw.replace(/<br\s*\/?>/gi, " ").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 300);
 }

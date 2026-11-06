@@ -8,7 +8,7 @@
     {
       "name": "note-cli",
       "source": "./",
-      "description": "Draft, search and analyze note.com articles from Claude Code / Codex via a bundled unofficial-API CLI"
+      "description": "Write, publish, research and engage on note.com from Claude Code / Codex via a bundled unofficial-API CLI"
     }
   ]
 }

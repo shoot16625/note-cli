@@ -1,7 +1,7 @@
 {
   "name": "note-cli",
-  "version": "0.1.0",
-  "description": "Draft, search and analyze note.com articles from Claude Code / Codex via a bundled unofficial-API CLI",
+  "version": "0.2.0",
+  "description": "Write, publish, research and engage on note.com from Claude Code / Codex via a bundled unofficial-API CLI",
   "author": {
     "name": "uchidash"
   },
@@ -15,16 +15,17 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "note-cli",
-    "shortDescription": "Draft, search and analyze note.com articles",
+    "shortDescription": "Write, publish and research note.com articles",
     "developerName": "uchidash",
     "category": "Productivity",
     "capabilities": [
       "Read",
       "Write"
     ],
-    "longDescription": "Save Markdown articles to note.com as drafts, search articles and hashtags, analyze what performs well, and review your own page views. Uses note.com's unofficial API through a dependency-free CLI bundled with the plugin.",
+    "longDescription": "Save Markdown articles to note.com as drafts and publish them (hashtags, price, paywall, scheduling), like, comment and follow, search articles and hashtags, analyze what performs well, and review your own page views. Uses note.com's unofficial API through a dependency-free CLI bundled with the plugin.",
     "defaultPrompt": [
       "Save this Markdown file to note as a draft.",
+      "Publish my note draft with the hashtags AI and ClaudeCode.",
       "What kind of note articles about Claude Code get the most likes?"
     ]
   },
