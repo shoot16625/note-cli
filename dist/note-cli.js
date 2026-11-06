@@ -2,7 +2,7 @@
 // @bun
 
 // src/cli.ts
-import { readFile as readFile4 } from "fs/promises";
+import { readFile as readFile4, stat as stat2 } from "fs/promises";
 import { dirname as dirname2, resolve as resolve2 } from "path";
 import { parseArgs } from "util";
 
@@ -209,6 +209,9 @@ class NoteClient {
     return this.session;
   }
   async request(path, opts = {}) {
+    return (await this.requestRaw(path, opts)).data;
+  }
+  async requestRaw(path, opts = {}) {
     const method = opts.method ?? "GET";
     const url = new URL(path.startsWith("http") ? path : `${NOTE_ORIGIN}/api${path}`);
     for (const [k, v] of Object.entries(opts.query ?? {})) {
@@ -233,6 +236,8 @@ class NoteClient {
           headers["X-XSRF-TOKEN"] = safeDecode(xsrf);
       }
     }
+    if (opts.bearer)
+      headers.Authorization = `Bearer ${opts.bearer}`;
     if (method !== "GET") {
       const origin = opts.editor ? EDITOR_ORIGIN : NOTE_ORIGIN;
       headers.Origin = origin;
@@ -272,7 +277,7 @@ class NoteClient {
         detail: typeof data === "string" ? data.slice(0, 500) : data
       });
     }
-    return data;
+    return { status: res.status, headers: res.headers, data };
   }
   async postForm(url, form) {
     const target = new URL(url);
@@ -1870,16 +1875,21 @@ function parseArticle(source) {
       markdown = markdown.slice(h1[0].length);
     }
   }
-  return { title, markdown: markdown.replace(/^\n+/, ""), frontmatter };
+  return { title, markdown: obsidianToMarkdown(markdown.replace(/^\n+/, "")), frontmatter };
 }
 function markdownToNoteHtml(markdown, opts = {}) {
   const warnings = [];
   const images = opts.images ?? new Map;
+  const embeds = opts.embeds ?? new Map;
   const marked = new Y({ gfm: true, breaks: true });
   const uploaded = (t) => t.type === "image" && images.has(t.href);
   marked.use({
     renderer: {
       paragraph(token) {
+        const lone = loneLink(token);
+        const embed = lone ? embeds.get(lone.href.trim()) : undefined;
+        if (embed)
+          return embedFigure(embed);
         if (!token.tokens.some(uploaded))
           return `<p>${this.parser.parseInline(token.tokens)}</p>
 `;
@@ -1963,6 +1973,63 @@ function figure(src, token) {
   return `<figure><img src="${escapeAttr(src)}" alt="${escapeAttr(token.text ?? "")}" width="620" height="auto">${caption}</figure>
 `;
 }
+function loneLink(token) {
+  const parts = token.tokens.filter((t) => !(t.type === "text" && !t.raw.trim()) && t.type !== "br");
+  return parts.length === 1 && parts[0].type === "link" ? parts[0] : null;
+}
+function embedFigure(e) {
+  const attrs = [
+    e.url ? `data-src="${escapeAttr(e.url)}"` : "",
+    e.service === "attachment" ? "" : `data-identifier="${escapeAttr(e.identifier ?? "null")}"`,
+    `embedded-service="${escapeAttr(e.service)}"`,
+    `embedded-content-key="${escapeAttr(e.key)}"`
+  ].filter(Boolean);
+  return `<figure ${attrs.join(" ")}>${e.service === "attachment" ? e.html ?? "" : ""}</figure>
+`;
+}
+function blockLinks(markdown) {
+  const urls = new Set;
+  const files = new Set;
+  const m = new Y({ gfm: true, breaks: true });
+  for (const t of m.lexer(markdown)) {
+    if (t.type !== "paragraph")
+      continue;
+    const link = loneLink(t);
+    if (!link)
+      continue;
+    const href = link.href.trim();
+    if (/^https?:\/\//i.test(href)) {
+      if (link.text.trim() === href || link.text.trim() === link.raw.trim().replace(/^<|>$/g, ""))
+        urls.add(href);
+    } else if (href && !href.startsWith("#") && !/^[a-z][a-z0-9+.-]*:/i.test(href) && !href.startsWith("//")) {
+      files.add(href);
+    } else if (/^file:\/\//i.test(href)) {
+      files.add(href);
+    }
+  }
+  return { urls: [...urls], files: [...files] };
+}
+function obsidianToMarkdown(markdown) {
+  let inFence = null;
+  return markdown.split(`
+`).map((line) => {
+    const fence = line.match(/^\s*(`{3,}|~{3,})/);
+    if (fence) {
+      if (!inFence)
+        inFence = fence[1][0];
+      else if (fence[1][0] === inFence)
+        inFence = null;
+      return line;
+    }
+    if (inFence)
+      return line;
+    return line.split(/(`+[^`]*`+)/).map((part, i) => i % 2 ? part : part.replace(/!\[\[([^\]|]+?)(?:\|([^\]]*))?\]\]/g, (_2, src, alt = "") => {
+      const target = src.trim();
+      return /^\d+(x\d+)?$/.test(alt.trim()) ? `![](<${target}>)` : `![${alt.trim()}](<${target}>)`;
+    }).replace(/\[\[([^\]|]+?)(?:\|([^\]]*))?\]\]/g, (_2, page, label) => (label ?? page).trim()).replace(/==(?=\S)([^=\n]+?)(?<=\S)==/g, "**$1**")).join("");
+  }).join(`
+`);
+}
 function imageRefs(markdown) {
   const refs = new Set;
   const m = new Y({ gfm: true, breaks: true });
@@ -1994,11 +2061,24 @@ function stripDangerous(html) {
   return html.replace(/<(script|iframe|object|embed|form|style)[^>]*>[\s\S]*?<\/\1>/gi, "").replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*')/gi, "");
 }
 function visibleTextLength(html) {
-  const text = html.replace(/<paywall-line[^>]*>\s*<\/paywall-line>/gi, "").replace(/<br\s*\/?>/gi, "").replace(/<[^>]+>/g, "").replace(/&(lt|gt|amp|quot|#0?39|nbsp);/g, "x");
+  const text = html.replace(/<figure\b[^>]*\sembedded-service="[^"]*"[^>]*>[\s\S]*?<\/figure>/gi, "").replace(/<paywall-line[^>]*>\s*<\/paywall-line>/gi, "").replace(/<br\s*\/?>/gi, "").replace(/<[^>]+>/g, "").replace(/&(lt|gt|amp|quot|#0?39|nbsp);/g, "x");
   return [...text].length;
 }
 function htmlToText(html) {
-  return html.replace(/<img\b[^>]*>/gi, (tag) => {
+  return html.replace(/<figure\b[^>]*\sembedded-service="([^"]*)"[^>]*>([\s\S]*?)<\/figure>/gi, (tag, service, inner) => {
+    if (service === "attachment") {
+      const name = inner.match(/file-widget__filename[^>]*>([^<]*)</)?.[1] ?? "file";
+      return `
+[attachment: ${name}]
+`;
+    }
+    const src = tag.match(/\sdata-src="([^"]*)"/)?.[1];
+    return src && src !== "null" ? `
+${src}
+` : `
+[${service} embed]
+`;
+  }).replace(/<img\b[^>]*>/gi, (tag) => {
     const attr = (name) => tag.match(new RegExp(`\\s${name}="([^"]*)"`, "i"))?.[1] ?? "";
     return `
 ![${attr("alt")}](${attr("src")})
@@ -2580,6 +2660,245 @@ async function membershipSummaries(client) {
   const d = res?.data ?? {};
   return { total: num(d.totalCount ?? d.total_count), items: Array.isArray(d.summaries) ? d.summaries : [] };
 }
+async function membershipAccess(client) {
+  const res = await client.request("/v3/memberships/circle_permissions", { auth: "required" });
+  const rows = Array.isArray(res?.data) ? res.data : [];
+  return rows.filter((r) => typeof r?.circle?.key === "string").map((r) => ({
+    circle: { key: r.circle.key, name: r.circle.name ?? null },
+    plans: (Array.isArray(r.circle_plans) ? r.circle_plans : []).filter((p) => typeof p?.key === "string").map((p) => ({ key: p.key, name: p.name ?? null }))
+  }));
+}
+var GRAPHQL_URL = "https://graphql.note.com/graphql";
+async function graphql(client, query, variables) {
+  const auth = await client.requestRaw("/v3/graphql/auth", { method: "POST", auth: "required" });
+  const token = auth.headers.getSetCookie().map((c2) => c2.match(/^note_gql_auth_token=([^;]+)/)?.[1]).find(Boolean);
+  if (!token)
+    throw new CliError("AUTH_ERROR", "note did not issue a GraphQL token; run `note-cli auth login` again.");
+  const res = await client.request(GRAPHQL_URL, { method: "POST", json: { query, variables }, bearer: token });
+  if (Array.isArray(res?.errors) && res.errors.length) {
+    throw new CliError("API_ERROR", `GraphQL error: ${res.errors.map((e) => e?.message).join("; ")}`, { detail: res.errors });
+  }
+  return res?.data;
+}
+var DASHBOARD_PERIODS = {
+  "7d": "LAST_7_DAYS",
+  "28d": "LAST_28_DAYS",
+  "365d": "LAST_365_DAYS",
+  all: "ALL",
+  "this-month": "THIS_MONTH",
+  "last-month": "LAST_MONTH",
+  custom: "CUSTOM"
+};
+var DASHBOARD_ORDERS = {
+  published: "PUBLISHED_DATE_DESC",
+  pv: "PAGE_VIEW_COUNT_DESC",
+  impressions: "IMPRESSION_COUNT_DESC",
+  likes: "LIKE_COUNT_DESC",
+  comments: "COMMENT_COUNT_DESC",
+  sales: "SALES_DESC"
+};
+var DASHBOARD_METRICS = { impressions: "IMPRESSION", pv: "PAGE_VIEW", likes: "LIKE", comments: "COMMENT", sales: "SALES" };
+function dashboardRange(period, opts = {}) {
+  const now = opts.now ?? new Date;
+  const day = (d) => {
+    const jst = new Date(d.getTime() + 9 * 3600000);
+    return jst.toISOString().slice(0, 10);
+  };
+  const minus = (days) => new Date(now.getTime() - days * 86400000);
+  const today = day(now);
+  switch (period) {
+    case "7d":
+      return { unit: "LAST_7_DAYS", date: day(minus(6)), endDate: null, from: day(minus(6)), to: today };
+    case "28d":
+      return { unit: "LAST_28_DAYS", date: day(minus(27)), endDate: null, from: day(minus(27)), to: today };
+    case "365d":
+      return { unit: "LAST_365_DAYS", date: day(minus(364)), endDate: null, from: day(minus(364)), to: today };
+    case "all":
+      return { unit: "ALL", date: today, endDate: null, from: null, to: today };
+    case "this-month":
+      return { unit: "THIS_MONTH", date: `${today.slice(0, 7)}-01`, endDate: null, from: `${today.slice(0, 7)}-01`, to: today };
+    case "last-month": {
+      const [y, m] = today.split("-").map(Number);
+      const first = m === 1 ? `${y - 1}-12-01` : `${y}-${String(m - 1).padStart(2, "0")}-01`;
+      return { unit: "LAST_MONTH", date: first, endDate: null, from: first, to: null };
+    }
+    case "custom": {
+      if (!opts.from || !opts.to)
+        throw new CliError("USAGE", "--period custom needs --from and --to (YYYY-MM-DD).");
+      return { unit: "CUSTOM", date: opts.from, endDate: opts.to, from: opts.from, to: opts.to };
+    }
+  }
+}
+var rangeVars = (r) => ({ unit: r.unit, date: r.date, endDate: r.endDate });
+var METRIC_FIELDS = "pageViewCount impressionCount likeCount commentCount salesAmount";
+var metrics = (m) => ({
+  pageViews: num(m?.pageViewCount),
+  impressions: num(m?.impressionCount),
+  likes: num(m?.likeCount),
+  comments: num(m?.commentCount),
+  sales: num(m?.salesAmount)
+});
+async function dashboardSummary(client, range) {
+  const data = await graphql(client, `query Summary($unit: DashboardPeriodUnit!, $date: Datetime!, $endDate: Datetime) {
+      dashboardSummary(unit: $unit, date: $date, endDate: $endDate) { lastUpdatedAt metrics { ${METRIC_FIELDS} } }
+    }`, rangeVars(range));
+  return { lastUpdatedAt: data?.dashboardSummary?.lastUpdatedAt ?? null, totals: metrics(data?.dashboardSummary?.metrics) };
+}
+async function dashboardNotes(client, range, opts) {
+  const notes = [];
+  let after = null;
+  while (notes.length < opts.limit) {
+    const data = await graphql(client, `query Notes($unit: DashboardPeriodUnit!, $date: Datetime!, $endDate: Datetime, $order: DashboardNoteListOrder, $first: Int!, $after: String) {
+        dashboardNoteListConnection(unit: $unit, date: $date, endDate: $endDate, order: $order, first: $first, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          edges { node { note { key title status publishedAt link { absoluteUrl } } metrics { ${METRIC_FIELDS} } } }
+        }
+      }`, { ...rangeVars(range), order: DASHBOARD_ORDERS[opts.order], first: Math.min(50, opts.limit - notes.length), after });
+    const conn = data?.dashboardNoteListConnection;
+    for (const edge of conn?.edges ?? []) {
+      const n = edge?.node?.note ?? {};
+      notes.push({
+        key: n.key ?? null,
+        title: n.title ?? null,
+        status: n.status ?? null,
+        publishedAt: n.publishedAt ?? null,
+        url: n.link?.absoluteUrl ?? null,
+        ...metrics(edge?.node?.metrics)
+      });
+    }
+    if (!conn?.pageInfo?.hasNextPage || !conn.pageInfo.endCursor)
+      break;
+    after = conn.pageInfo.endCursor;
+  }
+  return notes.slice(0, opts.limit);
+}
+async function dashboardReferrers(client, range) {
+  const data = await graphql(client, `query Referrers($unit: DashboardPeriodUnit!, $date: Datetime!, $endDate: Datetime) {
+      dashboardNoteReferrersChart(unit: $unit, date: $date, endDate: $endDate) { legend { name count } }
+    }`, rangeVars(range));
+  const legend = data?.dashboardNoteReferrersChart?.legend ?? [];
+  return legend.map((l) => ({ name: l?.name ?? null, count: num(l?.count) }));
+}
+async function dashboardChart(client, range, metric) {
+  const data = await graphql(client, `query Chart($unit: DashboardPeriodUnit!, $date: Datetime!, $endDate: Datetime, $metric: DashboardMetricKind!) {
+      dashboardMetricChart(unit: $unit, date: $date, endDate: $endDate, metric: $metric) { granularity points { label value startDate endDate } }
+    }`, { ...rangeVars(range), metric: DASHBOARD_METRICS[metric] });
+  const chart = data?.dashboardMetricChart;
+  return {
+    granularity: chart?.granularity ?? null,
+    points: (chart?.points ?? []).map((p) => ({ from: p?.startDate ?? null, to: p?.endDate ?? null, value: num(p?.value) }))
+  };
+}
+
+// src/embeds.ts
+import { basename } from "path";
+var SERVICES = Object.entries({
+  instagram: String.raw`^https://www\.instagram\.com\/(p|reel)\/[0-9a-zA-Z\-_]+/?`,
+  twitter: String.raw`^https://(?:(?:mobile\.)?twitter\.com|(?:mobile\.)?x\.com)\/[a-zA-Z0-9_]+\/status\/[0-9]+(\?.+)?`,
+  twitterProfile: String.raw`^https://(?:(?:mobile\.)?twitter\.com|(?:mobile\.)?x\.com)\/(i\/events\/)?[a-zA-Z0-9_]+/?$`,
+  youtube: String.raw`^https://(?:(?:www\.|m\.)?youtube\.com/(?:watch\?v=|live/|shorts/)|youtu\.be/)([a-zA-Z0-9\-_]+)(?:[?&].*)?$`,
+  vimeo: String.raw`^https://(player\.)?vimeo\.com\/(video\/)?[0-9a-zA-Z]+(\?.+)?`,
+  soundcloud: String.raw`^https://[m\.]?soundcloud\.com\/[0-9a-zA-Z\-_]+`,
+  niconico: String.raw`^https://www\.nicovideo\.jp\/watch\/.+`,
+  slideshare: String.raw`^https://www\.slideshare\.net\/[0-9a-zA-Z\-_]+\/.+`,
+  speakerdeck: String.raw`^https://speakerdeck\.com\/[0-9a-zA-Z\-_]+\/.+`,
+  googlemap: String.raw`^https://www\.google\.(com|co\.jp)\/maps[?/].+`,
+  "googlemap-short-url": String.raw`^https://goo\.gl\/maps[?/].+`,
+  googleform: String.raw`^https://docs\.google\.com\/forms\/d\/.+`,
+  googlepresentation: String.raw`^https://docs\.google\.com\/presentation\/d\/.+`,
+  flickr: String.raw`^https://(www\.flickr\.com\/photos|flic\.kr\/p)\/.+`,
+  spotify: String.raw`^https://open\.spotify\.com\/(playlist|track|album|artist)\/.+`,
+  spotifyLink: String.raw`^https://spotify\.link\/.+`,
+  itunes: String.raw`^https://itunes\.apple\.com\/[a-z]{2}\/(album|playlist)\/.+`,
+  "apple-music": String.raw`^https://music\.apple\.com\/[a-z]{2}\/(album|playlist)\/.+`,
+  codepen: String.raw`^https://codepen\.io\/.*?\/.+`,
+  gist: String.raw`^https://gist\.github\.com\/[0-9a-zA-Z\-_]+\/.+`,
+  wantedly: String.raw`^https://www\.wantedly\.com\/projects\/([0-9]+)\/?`,
+  tiktok: String.raw`^https://vt\.tiktok\.com\/[0-9a-zA-Z]+\/?`,
+  "tiktok-web": String.raw`^https://www\.tiktok\.com\/@.+?\/video\/[0-9]+`,
+  bandcamp: String.raw`^https://(.*\.)?bandcamp\.com\/(album|track)\/.+`,
+  omny: String.raw`^https://(omny\.fm\/shows\/.+?\/playlists/.+|omny\.fm\/shows\/.+?\/[0-9a-zA-Z\-]+)`,
+  voicy: String.raw`^https://voicy\.jp\/channel\/([0-9]+)\/([0-9]+)`,
+  githubRepository: String.raw`^https://github\.com\/[0-9a-zA-Z\-_]+\/[0-9a-zA-Z\-_]+`,
+  miro: String.raw`^https://miro\.com\/app\/board\/[0-9a-zA-Z\=\_]+/`,
+  canva: String.raw`^https://www\.canva\.com\/design\/[0-9a-zA-Z]+\/view`,
+  twitch: String.raw`^https://www\.twitch\.tv\/videos/[0-9]+`,
+  googleDriveFolder: String.raw`^https://drive\.google\.com\/drive\/folders\/[0-9a-zA-Z\-_]+`,
+  googleDriveFile: String.raw`^https://drive\.google\.com\/file\/d\/[0-9a-zA-Z\-_]+\/view`,
+  bluesky: String.raw`^https:\/\/bsky\.app\/profile\/([^\/]+)(?:\/post\/([^\/]+))?$`,
+  threads: String.raw`^https:\/\/www\.threads\.(net|com)\/([^\/]+)(?:\/post\/([^\/]+))?$`,
+  "apple-podcast": String.raw`^https://podcasts\.apple\.com\/[a-z]{2}\/podcast\/(.+\/)?id[0-9]+`
+}).map(([name, pattern]) => [name, new RegExp(pattern)]);
+var NOTE_ARTICLE = /^https:\/\/note\.com\/[A-Za-z0-9_-]+\/n\/(n[0-9a-f]{8,})\/?(?:[?#].*)?$/;
+function embedService(url) {
+  if (NOTE_ARTICLE.test(url))
+    return "note";
+  return SERVICES.find(([, re2]) => re2.test(url))?.[0] ?? null;
+}
+async function createEmbed(client, noteKey, url) {
+  const article = url.match(NOTE_ARTICLE);
+  if (article) {
+    const form = new FormData;
+    form.append("url", url);
+    form.append("height", "211");
+    form.append("embeddable_type", "Note");
+    form.append("embeddable_key", noteKey);
+    const res2 = await client.request("/v1/embed", { method: "POST", auth: "required", editor: true, form });
+    const key2 = res2?.data?.embedded_content?.key;
+    if (typeof key2 !== "string")
+      throw new CliError("API_ERROR", `note did not return an embed for ${url}.`, { detail: res2 });
+    return { service: "note", key: key2, url, identifier: article[1], html: null };
+  }
+  let service = embedService(url);
+  if (!service) {
+    const check = await client.request("/v2/embed_by_external_api/check_type", { auth: "required", editor: true, query: { url } });
+    const type = check?.data?.type;
+    service = type === "Oembed" ? "oembed" : type === "JobPosting" ? "hr" : typeof type === "string" && type ? type : "external-article";
+  }
+  const res = await client.request("/v2/embed_by_external_api", {
+    auth: "required",
+    editor: true,
+    query: { url, service, embeddable_key: noteKey, embeddable_type: "Note" }
+  });
+  const key = res?.data?.key;
+  if (typeof key !== "string")
+    throw new CliError("API_ERROR", `note did not return an embed for ${url}.`, { detail: res });
+  return { service, key, url, identifier: null, html: null };
+}
+async function uploadAttachment(client, noteKey, file) {
+  const name = basename(file.path);
+  const form = new FormData;
+  form.append("file", new Blob([file.bytes], { type: file.mimeType }), name);
+  form.append("file_name", name);
+  form.append("note_key", noteKey);
+  const res = await client.request("/v2/attachments/upload", { method: "POST", auth: "required", editor: true, form });
+  const d = res?.data;
+  if (d?.error)
+    throw new CliError("API_ERROR", `Attachment ${name} was rejected: ${d.error?.message ?? JSON.stringify(d.error)}`, { detail: res });
+  if (typeof d?.embedded_content_key !== "string" || typeof d?.html_for_embed !== "string") {
+    throw new CliError("API_ERROR", `note did not accept the attachment ${name}.`, { detail: res });
+  }
+  return { service: "attachment", key: d.embedded_content_key, url: null, identifier: d.attachment_key ?? null, html: d.html_for_embed };
+}
+var MIME = {
+  pdf: "application/pdf",
+  zip: "application/zip",
+  txt: "text/plain",
+  csv: "text/csv",
+  md: "text/markdown",
+  json: "application/json",
+  epub: "application/epub+zip",
+  mp3: "audio/mpeg",
+  m4a: "audio/mp4",
+  wav: "audio/wav",
+  mp4: "video/mp4",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+};
+function attachmentMime(path) {
+  return MIME[path.split(".").pop()?.toLowerCase() ?? ""] ?? "application/octet-stream";
+}
 
 // src/browser.ts
 import { spawn } from "child_process";
@@ -2720,7 +3039,7 @@ async function browserLogin(opts) {
 
 // src/images.ts
 import { readFile as readFile3, stat } from "fs/promises";
-import { basename, isAbsolute, resolve } from "path";
+import { basename as basename2, isAbsolute, resolve } from "path";
 var MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 function sniffImageType(bytes) {
   const b = bytes;
@@ -2763,7 +3082,7 @@ async function readImage(path) {
   const mimeType = sniffImageType(bytes);
   if (!mimeType)
     throw new CliError("INVALID_INPUT", `Unsupported image type: ${path} (use PNG, JPEG, GIF or WebP).`);
-  return { path, filename: basename(path), mimeType, bytes };
+  return { path, filename: basename2(path), mimeType, bytes };
 }
 var EYECATCH_RATIO = 1280 / 670;
 function imageSize(bytes) {
@@ -2871,7 +3190,7 @@ function buildPublishPayload(note, s) {
     author_ids: [],
     body_length: visibleTextLength(html),
     disable_comment: s.disableComments,
-    exclude_from_creator_top: false,
+    exclude_from_creator_top: Boolean(s.hideFromProfile),
     exclude_ai_learning_reward: false,
     free_body: content.slice(0, freeCount).join(""),
     pay_body: content.slice(freeCount).join(""),
@@ -2886,7 +3205,8 @@ function buildPublishPayload(note, s) {
     price: s.price,
     send_notifications_flag: s.notify,
     separator: s.price > 0 ? separator : null,
-    ...note.slug ? { slug: note.slug } : {},
+    ...note.slug || note.key ? { slug: note.slug || `slug-${note.key}` } : {},
+    ...s.circlePermissions ? { circle_permissions: s.circlePermissions } : {},
     status: s.publishAt ? "reserved" : "published",
     ...s.publishAt ? { publish_at: s.publishAt } : {},
     discount_campaigns: []
@@ -3010,8 +3330,8 @@ function urlname(input) {
 }
 function hashtag(input) {
   const name = input.trim().replace(/^#/, "");
-  if (!name || name.length > 100 || /[\s/\\?#%]/.test(name) || /^\.+$/.test(name)) {
-    throw new CliError("USAGE", `Not a valid hashtag: "${input}".`);
+  if (!name || name.length > 100 || /[\s/\\?#%.]/.test(name)) {
+    throw new CliError("USAGE", `Not a valid hashtag: "${input}" (no spaces, dots or / ? # %).`);
   }
   return name;
 }
@@ -3097,16 +3417,17 @@ var COMMANDS = {
     }
   },
   "draft create": {
-    usage: "draft create <file.md|-> [--title <title>] [--eyecatch <image>] [--dry-run]",
-    summary: "Create a new draft from Markdown; local images are uploaded (title: frontmatter `title:` or first `# H1`)",
-    options: { title: { type: "string" }, eyecatch: { type: "string" }, "dry-run": { type: "boolean" } },
+    usage: "draft create <file.md|-> [--title <title>] [--eyecatch <image>] [--no-embed] [--dry-run]",
+    summary: "Create a new draft from Markdown; local images are uploaded, a URL alone on its line becomes an embed, a link alone to a local file an attachment",
+    options: { title: { type: "string" }, eyecatch: { type: "string" }, "no-embed": { type: "boolean" }, "dry-run": { type: "boolean" } },
     args: 1,
     async run({ values, positionals, client }) {
       const input = await readArticleInput(positionals[0], values);
       if (values["dry-run"])
         return dryRunResult(input);
-      const article = await uploadAndConvert(client, input);
-      const draft = await createDraft(client, article.title);
+      const imageUrls = await uploadImages(client, input);
+      const draft = await createDraft(client, input.title);
+      const article = await uploadAndConvert(client, input, draft.key, imageUrls);
       await saveDraft(client, draft.id, article);
       const eyecatch = await applyEyecatch(client, draft.id, input.eyecatch);
       return {
@@ -3114,15 +3435,15 @@ var COMMANDS = {
         ...draft,
         title: article.title,
         bodyLength: article.bodyLength,
-        ...imagesField(article.images, eyecatch),
+        ...imagesField(article.images, eyecatch, article.embeds),
         warnings: [...article.warnings, ...eyecatch.warnings]
       };
     }
   },
   "draft update": {
-    usage: "draft update <id|key|url> <file.md|-> [--title <title>] [--eyecatch <image>] [--dry-run]",
-    summary: "Overwrite an existing draft's title and body with Markdown; local images are uploaded",
-    options: { title: { type: "string" }, eyecatch: { type: "string" }, "dry-run": { type: "boolean" } },
+    usage: "draft update <id|key|url> <file.md|-> [--title <title>] [--eyecatch <image>] [--no-embed] [--dry-run]",
+    summary: "Overwrite an existing draft's title and body with Markdown (images, embeds and attachments as in draft create)",
+    options: { title: { type: "string" }, eyecatch: { type: "string" }, "no-embed": { type: "boolean" }, "dry-run": { type: "boolean" } },
     args: 2,
     async run({ values, positionals, client }) {
       const ref = noteIdOrKey(positionals[0]);
@@ -3130,7 +3451,7 @@ var COMMANDS = {
       if (values["dry-run"])
         return dryRunResult(input);
       const { id, key } = await resolveNoteId(client, ref);
-      const article = await uploadAndConvert(client, input);
+      const article = await uploadAndConvert(client, input, key);
       await saveDraft(client, id, article);
       const eyecatch = await applyEyecatch(client, id, input.eyecatch);
       return {
@@ -3140,7 +3461,7 @@ var COMMANDS = {
         editUrl: key ? editUrl(key) : null,
         title: article.title,
         bodyLength: article.bodyLength,
-        ...imagesField(article.images, eyecatch),
+        ...imagesField(article.images, eyecatch, article.embeds),
         warnings: [...article.warnings, ...eyecatch.warnings]
       };
     }
@@ -3436,19 +3757,65 @@ var COMMANDS = {
       });
     }
   },
+  "stats dashboard": {
+    usage: "stats dashboard [--period 7d|28d|365d|all|this-month|last-month|custom] [--from <YYYY-MM-DD> --to <YYYY-MM-DD>] [--order published|pv|impressions|likes|comments|sales] [--limit <n>]",
+    summary: "Your dashboard for a period (requires login): totals incl. impressions and sales, where readers came from, and per-article numbers",
+    options: {
+      period: { type: "string", default: "28d" },
+      from: { type: "string" },
+      to: { type: "string" },
+      order: { type: "string", default: "pv" },
+      limit: { type: "string", default: "20" }
+    },
+    async run({ values, client }) {
+      const range = dashboardRangeFrom(values);
+      const order = oneOf(values.order, Object.keys(DASHBOARD_ORDERS), "order");
+      const limit = int(values.limit, "limit");
+      const summary = await dashboardSummary(client, range);
+      const referrers = await dashboardReferrers(client, range);
+      const notes = limit > 0 ? await dashboardNotes(client, range, { order, limit }) : [];
+      return {
+        period: values.period,
+        from: range.from,
+        to: range.to,
+        lastUpdatedAt: summary.lastUpdatedAt,
+        totals: summary.totals,
+        referrers,
+        ...limit > 0 ? { order, notes } : {}
+      };
+    }
+  },
+  "stats chart": {
+    usage: "stats chart [--metric pv|impressions|likes|comments|sales] [--period 7d|28d|365d|all|this-month|last-month|custom] [--from <YYYY-MM-DD> --to <YYYY-MM-DD>]",
+    summary: "One of your metrics over time (by day, week or month depending on the period; requires login)",
+    options: {
+      metric: { type: "string", default: "pv" },
+      period: { type: "string", default: "28d" },
+      from: { type: "string" },
+      to: { type: "string" }
+    },
+    async run({ values, client }) {
+      const metric = oneOf(values.metric, Object.keys(DASHBOARD_METRICS), "metric");
+      const range = dashboardRangeFrom(values);
+      return { metric, period: values.period, from: range.from, to: range.to, ...await dashboardChart(client, range, metric) };
+    }
+  },
   publish: {
-    usage: "publish <key|url> [file.md|-] --yes [--hashtag <tag>]... [--price <yen>] [--magazine <key>]... [--schedule <time>] [--toc] [--disable-comments] [--refund] [--no-notify] [--title <t>] [--eyecatch <image>] [--dry-run] [--browser <path>] [--timeout <sec>]",
+    usage: "publish <key|url> [file.md|-] --yes [--hashtag <tag>]... [--price <yen>] [--magazine <key>]... [--membership all|none|<planKey>]... [--schedule <time>] [--toc] [--disable-comments] [--refund] [--no-notify] [--hide-from-profile] [--title <t>] [--eyecatch <image>] [--no-embed] [--dry-run] [--browser <path>] [--timeout <sec>]",
     summary: "Publish a draft (or re-publish an article), optionally saving a Markdown file to it first. A browser window opens briefly to pass note's reCAPTCHA",
     options: {
       yes: { type: "boolean" },
       hashtag: { type: "string", multiple: true },
       price: { type: "string", default: "0" },
       magazine: { type: "string", multiple: true },
+      membership: { type: "string", multiple: true },
+      "hide-from-profile": { type: "boolean" },
       schedule: { type: "string" },
       toc: { type: "boolean" },
       "disable-comments": { type: "boolean" },
       refund: { type: "boolean" },
       "no-notify": { type: "boolean" },
+      "no-embed": { type: "boolean" },
       title: { type: "string" },
       eyecatch: { type: "string" },
       "dry-run": { type: "boolean" },
@@ -3459,10 +3826,13 @@ var COMMANDS = {
     async run({ values, positionals, client, deps }) {
       const key = noteKey(positionals[0]);
       const settings = publishSettings(values);
+      const membership = list(values.membership);
+      if (membership.length)
+        settings.circlePermissions = circlePermissions(membership, await membershipAccess(client));
       const timeoutSec = int(values.timeout, "timeout");
       const input = positionals[1] ? await readArticleInput(positionals[1], values) : null;
       if (values["dry-run"]) {
-        const note2 = input ? { name: input.title, body: dryRunResult(input).html, slug: null } : await savedNote(client, key);
+        const note2 = input ? { name: input.title, body: dryRunResult(input).html, slug: null, key } : await savedNote(client, key);
         return { dryRun: true, key, ...publishPreview(buildPublishPayload(note2, settings)) };
       }
       if (!values.yes) {
@@ -3480,11 +3850,11 @@ var COMMANDS = {
       const extra = {};
       const warnings = [];
       if (input) {
-        const article = await uploadAndConvert(client, input);
+        const article = await uploadAndConvert(client, input, key);
         await saveDraft(client, id, article);
         const eyecatch = await applyEyecatch(client, id, input.eyecatch);
-        note = { name: article.title, body: article.html, slug: note.slug };
-        Object.assign(extra, imagesField(article.images, eyecatch));
+        note = { ...note, name: article.title, body: article.html };
+        Object.assign(extra, imagesField(article.images, eyecatch, article.embeds));
         warnings.push(...article.warnings, ...eyecatch.warnings);
       }
       const payload = buildPublishPayload(note, settings);
@@ -3705,8 +4075,20 @@ async function readArticleInput(file, values) {
   }
   const eyecatchPath = typeof values.eyecatch === "string" ? resolve2(values.eyecatch) : parsed.frontmatter.eyecatch ? resolveImagePath(parsed.frontmatter.eyecatch, baseDir) : null;
   const eyecatch = eyecatchPath ? await readImage(eyecatchPath) : null;
-  return { title, markdown: parsed.markdown, images, eyecatch };
+  const links = blockLinks(parsed.markdown);
+  const attachments = new Map;
+  for (const href of links.files) {
+    const path = resolveImagePath(href, baseDir);
+    const info = await stat2(path).catch(() => null);
+    if (!info?.isFile())
+      throw new CliError("INVALID_INPUT", `Cannot attach ${href}: no such file (${path}). A link alone on its line to a local file becomes a download attachment.`);
+    if (info.size > MAX_ATTACHMENT_BYTES)
+      throw new CliError("INVALID_INPUT", `Cannot attach ${path}: larger than ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB.`);
+    attachments.set(href, { path, bytes: new Uint8Array(await readFile4(path)), mimeType: attachmentMime(path) });
+  }
+  return { title, markdown: parsed.markdown, images, eyecatch, embedUrls: values["no-embed"] ? [] : links.urls, attachments };
 }
+var MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 function dryRunResult(input) {
   const preview = new Map([...input.images.keys()].map((src) => [src, src]));
   const { html, bodyLength, warnings } = markdownToNoteHtml(input.markdown, { images: preview });
@@ -3717,10 +4099,15 @@ function dryRunResult(input) {
     bodyLength,
     images: [...input.images].map(([src, f]) => ({ src, path: f.path, mimeType: f.mimeType, bytes: f.bytes.length })),
     eyecatch: input.eyecatch ? { path: input.eyecatch.path, mimeType: input.eyecatch.mimeType, bytes: input.eyecatch.bytes.length } : null,
-    warnings: [...warnings, ...input.eyecatch ? [eyecatchRatioWarning(input.eyecatch)].filter((w2) => !!w2) : []]
+    ...input.embedUrls.length ? { embeds: input.embedUrls.map((url) => ({ url, service: embedService(url) ?? "decided by note (link card or player)" })) } : {},
+    ...input.attachments.size ? { attachments: [...input.attachments.values()].map((f) => ({ path: f.path, mimeType: f.mimeType, bytes: f.bytes.length })) } : {},
+    warnings: [
+      ...warnings.filter((w2) => ![...input.attachments.keys()].some((href) => w2.startsWith(`Link "${href}"`))),
+      ...input.eyecatch ? [eyecatchRatioWarning(input.eyecatch)].filter((w2) => !!w2) : []
+    ]
   };
 }
-async function uploadAndConvert(client, input) {
+async function uploadImages(client, input) {
   const urls = new Map;
   const byPath = new Map;
   for (const [src, file] of input.images) {
@@ -3731,8 +4118,43 @@ async function uploadAndConvert(client, input) {
     }
     urls.set(src, url);
   }
-  const { html, bodyLength, warnings } = markdownToNoteHtml(input.markdown, { images: urls });
-  return { title: input.title, html, bodyLength, warnings, images: [...urls].map(([src, url]) => ({ src, url })) };
+  return urls;
+}
+async function uploadAndConvert(client, input, noteKey2, uploaded) {
+  const urls = uploaded ?? await uploadImages(client, input);
+  const embeds = new Map;
+  const blockWarnings = [];
+  if (!noteKey2 && (input.embedUrls.length || input.attachments.size)) {
+    blockWarnings.push("Embeds and attachments were skipped because the draft was given by numeric id; pass its key (n...) instead.");
+  } else if (noteKey2) {
+    for (const url of input.embedUrls) {
+      try {
+        embeds.set(url, await createEmbed(client, noteKey2, url));
+      } catch (e) {
+        if (!(e instanceof CliError) || e.code === "NOT_LOGGED_IN" || e.code === "AUTH_ERROR")
+          throw e;
+        blockWarnings.push(`Could not embed ${url} (${e.message}); left as a link.`);
+      }
+    }
+    for (const [href, file] of input.attachments) {
+      try {
+        embeds.set(href, await uploadAttachment(client, noteKey2, file));
+      } catch (e) {
+        if (!(e instanceof CliError) || e.code === "NOT_LOGGED_IN" || e.code === "AUTH_ERROR")
+          throw e;
+        blockWarnings.push(`Could not attach ${file.path} (${e.message}); dropped.`);
+      }
+    }
+  }
+  const { html, bodyLength, warnings } = markdownToNoteHtml(input.markdown, { images: urls, embeds });
+  return {
+    title: input.title,
+    html,
+    bodyLength,
+    warnings: [...blockWarnings, ...warnings],
+    images: [...urls].map(([src, url]) => ({ src, url })),
+    embeds: [...embeds.values()].map((e) => ({ service: e.service, url: e.url, key: e.key }))
+  };
 }
 async function applyEyecatch(client, noteId, file) {
   if (!file)
@@ -3749,9 +4171,10 @@ async function applyEyecatch(client, noteId, file) {
     };
   }
 }
-function imagesField(images, eyecatch) {
+function imagesField(images, eyecatch, embeds = []) {
   return {
     ...images.length ? { images } : {},
+    ...embeds.length ? { embeds } : {},
     ...eyecatch.result ? { eyecatch: eyecatch.result } : {}
   };
 }
@@ -3782,8 +4205,49 @@ function publishSettings(values) {
     notify: !values["no-notify"],
     toc: Boolean(values.toc),
     disableComments: Boolean(values["disable-comments"]),
-    refund: Boolean(values.refund)
+    refund: Boolean(values.refund),
+    hideFromProfile: Boolean(values["hide-from-profile"])
   };
+}
+function circlePermissions(choices, access) {
+  if (choices.includes("none")) {
+    if (choices.length > 1)
+      throw new CliError("USAGE", "--membership none cannot be combined with other values.");
+    return [];
+  }
+  const circle = access[0];
+  if (!circle)
+    throw new CliError("FORBIDDEN", "You have no membership (\u30E1\u30F3\u30D0\u30FC\u30B7\u30C3\u30D7) to publish the article to.");
+  if (choices.includes("all")) {
+    if (choices.length > 1)
+      throw new CliError("USAGE", "--membership all already covers every plan; do not list plans with it.");
+    return [{ kind: "circle", keys: [circle.circle.key] }];
+  }
+  const known = new Map(access.flatMap((a3) => a3.plans.map((p) => [p.key, p])));
+  const unknown = choices.filter((c2) => !known.has(c2));
+  if (unknown.length) {
+    const plans = [...known.values()].map((p) => `${p.key}${p.name ? ` (${p.name})` : ""}`).join(", ") || "none";
+    throw new CliError("USAGE", `Unknown membership plan: ${unknown.join(", ")}. Your plans: ${plans}.`);
+  }
+  return [{ kind: "circle_plan", keys: [...new Set(choices)] }];
+}
+function dashboardRangeFrom(values) {
+  const period = oneOf(values.period, Object.keys(DASHBOARD_PERIODS), "period");
+  const date = (x2, name) => {
+    if (x2 === undefined)
+      return;
+    if (typeof x2 !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(x2) || Number.isNaN(new Date(x2).getTime())) {
+      throw new CliError("USAGE", `--${name} must be a date like 2026-10-01.`);
+    }
+    return x2;
+  };
+  const from = date(values.from, "from");
+  const to = date(values.to, "to");
+  if (period !== "custom" && (from || to))
+    throw new CliError("USAGE", "--from/--to only apply with --period custom.");
+  if (from && to && from > to)
+    throw new CliError("USAGE", "--from must not be after --to.");
+  return dashboardRange(period, { from, to });
 }
 function noteFromDraft(data) {
   const draft = data?.note_draft ?? {};
@@ -3793,7 +4257,7 @@ function noteFromDraft(data) {
     throw new CliError("INVALID_INPUT", "The draft has no title; set one before publishing.");
   if (typeof body !== "string" || !body.trim())
     throw new CliError("INVALID_INPUT", "The draft has no body; save content before publishing.");
-  return { name, body, slug: typeof data?.slug === "string" ? data.slug : null };
+  return { name, body, slug: typeof data?.slug === "string" ? data.slug : null, key: typeof data?.key === "string" ? data.key : null };
 }
 async function savedNote(client, key) {
   const data = await getDraft(client, key);
@@ -3813,6 +4277,8 @@ function publishPreview(p) {
     disableComments: p.disable_comment,
     refund: p.is_refund,
     notify: p.send_notifications_flag,
+    hideFromProfile: p.exclude_from_creator_top,
+    ...p.circle_permissions ? { membership: p.circle_permissions } : {},
     bodyLength: p.body_length,
     freeLength: visibleTextLength(p.free_body),
     paidLength: visibleTextLength(p.pay_body),

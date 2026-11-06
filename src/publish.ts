@@ -16,6 +16,19 @@ export interface PublishSettings {
   disableComments: boolean;
   /** Allow refunds on a paid article. */
   refund: boolean;
+  /** Keep the article off your profile's article list (it stays reachable by URL, magazines and search). */
+  hideFromProfile?: boolean;
+  /**
+   * Membership plans that may read the article (`circle_permissions`); [] removes it from your
+   * membership; undefined leaves note's default.
+   */
+  circlePermissions?: CirclePermission[];
+}
+
+export interface CirclePermission {
+  /** "circle" = every member, "circle_plan" = only the listed plans. */
+  kind: "circle" | "circle_plan";
+  keys: string[];
 }
 
 const VOID_TAGS = new Set(["br", "img", "hr", "input", "source", "wbr"]);
@@ -59,7 +72,7 @@ export function imageKey(src: string): string | null {
  * Build the body of `PUT /v1/text_notes/{id}` the way note's publish page does: the body is
  * split at the paywall line into free/paid parts, and `separator` names the last free block.
  */
-export function buildPublishPayload(note: { name: string; body: string; slug?: string | null }, s: PublishSettings) {
+export function buildPublishPayload(note: { name: string; body: string; slug?: string | null; key?: string | null }, s: PublishSettings) {
   const blocks = topLevelBlocks(note.body);
   const paywallAt = blocks.findIndex(isPaywall);
   const content = blocks.filter((b) => !isPaywall(b));
@@ -83,7 +96,7 @@ export function buildPublishPayload(note: { name: string; body: string; slug?: s
     author_ids: [],
     body_length: visibleTextLength(html),
     disable_comment: s.disableComments,
-    exclude_from_creator_top: false,
+    exclude_from_creator_top: Boolean(s.hideFromProfile),
     exclude_ai_learning_reward: false,
     free_body: content.slice(0, freeCount).join(""),
     pay_body: content.slice(freeCount).join(""),
@@ -98,7 +111,9 @@ export function buildPublishPayload(note: { name: string; body: string; slug?: s
     price: s.price,
     send_notifications_flag: s.notify,
     separator: s.price > 0 ? separator : null,
-    ...(note.slug ? { slug: note.slug } : {}),
+    // An empty slug makes note fail with a bare 500 (notably for scheduled posts); the editor uses slug-<key>.
+    ...(note.slug || note.key ? { slug: note.slug || `slug-${note.key}` } : {}),
+    ...(s.circlePermissions ? { circle_permissions: s.circlePermissions } : {}),
     status: s.publishAt ? "reserved" : "published",
     ...(s.publishAt ? { publish_at: s.publishAt } : {}),
     discount_campaigns: [],

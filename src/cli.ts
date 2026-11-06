@@ -1,14 +1,15 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { analyzeNotes } from "./analyze.ts";
 import * as api from "./api.ts";
 import { CliError, NoteClient } from "./client.ts";
+import { attachmentMime, createEmbed, embedService, uploadAttachment, type Embed } from "./embeds.ts";
 import { browserLogin } from "./login.ts";
 import { eyecatchRatioWarning, isLocalImageRef, readImage, resolveImagePath, type ImageFile } from "./images.ts";
-import { htmlToText, imageRefs, markdownToNoteHtml, parseArticle, visibleTextLength } from "./markdown.ts";
+import { blockLinks, htmlToText, imageRefs, markdownToNoteHtml, parseArticle, visibleTextLength } from "./markdown.ts";
 import { tryNormalizeNote, type Skipped } from "./normalize.ts";
-import { buildPublishPayload, publishInBrowser, type PublishSettings } from "./publish.ts";
+import { buildPublishPayload, publishInBrowser, type CirclePermission, type PublishSettings } from "./publish.ts";
 import { clearSession, loadSession, parseCookieHeader, saveSession, sessionPath } from "./session.ts";
 import * as v from "./validate.ts";
 
@@ -93,15 +94,17 @@ const COMMANDS: Record<string, Command> = {
 
   // ---------------- drafts ----------------
   "draft create": {
-    usage: "draft create <file.md|-> [--title <title>] [--eyecatch <image>] [--dry-run]",
-    summary: "Create a new draft from Markdown; local images are uploaded (title: frontmatter `title:` or first `# H1`)",
-    options: { title: { type: "string" }, eyecatch: { type: "string" }, "dry-run": { type: "boolean" } },
+    usage: "draft create <file.md|-> [--title <title>] [--eyecatch <image>] [--no-embed] [--dry-run]",
+    summary: "Create a new draft from Markdown; local images are uploaded, a URL alone on its line becomes an embed, a link alone to a local file an attachment",
+    options: { title: { type: "string" }, eyecatch: { type: "string" }, "no-embed": { type: "boolean" }, "dry-run": { type: "boolean" } },
     args: 1,
     async run({ values, positionals, client }) {
       const input = await readArticleInput(positionals[0], values);
       if (values["dry-run"]) return dryRunResult(input);
-      const article = await uploadAndConvert(client, input);
-      const draft = await api.createDraft(client, article.title);
+      // Images first, so a rejected image does not leave an empty draft behind.
+      const imageUrls = await uploadImages(client, input);
+      const draft = await api.createDraft(client, input.title);
+      const article = await uploadAndConvert(client, input, draft.key, imageUrls);
       await api.saveDraft(client, draft.id, article);
       const eyecatch = await applyEyecatch(client, draft.id, input.eyecatch);
       return {
@@ -109,22 +112,22 @@ const COMMANDS: Record<string, Command> = {
         ...draft,
         title: article.title,
         bodyLength: article.bodyLength,
-        ...imagesField(article.images, eyecatch),
+        ...imagesField(article.images, eyecatch, article.embeds),
         warnings: [...article.warnings, ...eyecatch.warnings],
       };
     },
   },
   "draft update": {
-    usage: "draft update <id|key|url> <file.md|-> [--title <title>] [--eyecatch <image>] [--dry-run]",
-    summary: "Overwrite an existing draft's title and body with Markdown; local images are uploaded",
-    options: { title: { type: "string" }, eyecatch: { type: "string" }, "dry-run": { type: "boolean" } },
+    usage: "draft update <id|key|url> <file.md|-> [--title <title>] [--eyecatch <image>] [--no-embed] [--dry-run]",
+    summary: "Overwrite an existing draft's title and body with Markdown (images, embeds and attachments as in draft create)",
+    options: { title: { type: "string" }, eyecatch: { type: "string" }, "no-embed": { type: "boolean" }, "dry-run": { type: "boolean" } },
     args: 2,
     async run({ values, positionals, client }) {
       const ref = v.noteIdOrKey(positionals[0]);
       const input = await readArticleInput(positionals[1], values);
       if (values["dry-run"]) return dryRunResult(input);
       const { id, key } = await api.resolveNoteId(client, ref);
-      const article = await uploadAndConvert(client, input);
+      const article = await uploadAndConvert(client, input, key);
       await api.saveDraft(client, id, article);
       const eyecatch = await applyEyecatch(client, id, input.eyecatch);
       return {
@@ -134,7 +137,7 @@ const COMMANDS: Record<string, Command> = {
         editUrl: key ? api.editUrl(key) : null,
         title: article.title,
         bodyLength: article.bodyLength,
-        ...imagesField(article.images, eyecatch),
+        ...imagesField(article.images, eyecatch, article.embeds),
         warnings: [...article.warnings, ...eyecatch.warnings],
       };
     },
@@ -434,10 +437,57 @@ const COMMANDS: Record<string, Command> = {
     },
   },
 
+  "stats dashboard": {
+    usage:
+      "stats dashboard [--period 7d|28d|365d|all|this-month|last-month|custom] [--from <YYYY-MM-DD> --to <YYYY-MM-DD>] [--order published|pv|impressions|likes|comments|sales] [--limit <n>]",
+    summary:
+      "Your dashboard for a period (requires login): totals incl. impressions and sales, where readers came from, and per-article numbers",
+    options: {
+      period: { type: "string", default: "28d" },
+      from: { type: "string" },
+      to: { type: "string" },
+      order: { type: "string", default: "pv" },
+      limit: { type: "string", default: "20" },
+    },
+    async run({ values, client }) {
+      const range = dashboardRangeFrom(values);
+      const order = oneOf(values.order, Object.keys(api.DASHBOARD_ORDERS), "order") as api.DashboardOrder;
+      const limit = int(values.limit, "limit");
+      const summary = await api.dashboardSummary(client, range);
+      const referrers = await api.dashboardReferrers(client, range);
+      const notes = limit > 0 ? await api.dashboardNotes(client, range, { order, limit }) : [];
+      return {
+        period: values.period,
+        from: range.from,
+        to: range.to,
+        lastUpdatedAt: summary.lastUpdatedAt,
+        totals: summary.totals,
+        referrers,
+        ...(limit > 0 ? { order, notes } : {}),
+      };
+    },
+  },
+  "stats chart": {
+    usage:
+      "stats chart [--metric pv|impressions|likes|comments|sales] [--period 7d|28d|365d|all|this-month|last-month|custom] [--from <YYYY-MM-DD> --to <YYYY-MM-DD>]",
+    summary: "One of your metrics over time (by day, week or month depending on the period; requires login)",
+    options: {
+      metric: { type: "string", default: "pv" },
+      period: { type: "string", default: "28d" },
+      from: { type: "string" },
+      to: { type: "string" },
+    },
+    async run({ values, client }) {
+      const metric = oneOf(values.metric, Object.keys(api.DASHBOARD_METRICS), "metric") as api.DashboardMetric;
+      const range = dashboardRangeFrom(values);
+      return { metric, period: values.period, from: range.from, to: range.to, ...(await api.dashboardChart(client, range, metric)) };
+    },
+  },
+
   // ---------------- publishing ----------------
   publish: {
     usage:
-      "publish <key|url> [file.md|-] --yes [--hashtag <tag>]... [--price <yen>] [--magazine <key>]... [--schedule <time>] [--toc] [--disable-comments] [--refund] [--no-notify] [--title <t>] [--eyecatch <image>] [--dry-run] [--browser <path>] [--timeout <sec>]",
+      "publish <key|url> [file.md|-] --yes [--hashtag <tag>]... [--price <yen>] [--magazine <key>]... [--membership all|none|<planKey>]... [--schedule <time>] [--toc] [--disable-comments] [--refund] [--no-notify] [--hide-from-profile] [--title <t>] [--eyecatch <image>] [--no-embed] [--dry-run] [--browser <path>] [--timeout <sec>]",
     summary:
       "Publish a draft (or re-publish an article), optionally saving a Markdown file to it first. A browser window opens briefly to pass note's reCAPTCHA",
     options: {
@@ -445,11 +495,14 @@ const COMMANDS: Record<string, Command> = {
       hashtag: { type: "string", multiple: true },
       price: { type: "string", default: "0" },
       magazine: { type: "string", multiple: true },
+      membership: { type: "string", multiple: true },
+      "hide-from-profile": { type: "boolean" },
       schedule: { type: "string" },
       toc: { type: "boolean" },
       "disable-comments": { type: "boolean" },
       refund: { type: "boolean" },
       "no-notify": { type: "boolean" },
+      "no-embed": { type: "boolean" },
       title: { type: "string" },
       eyecatch: { type: "string" },
       "dry-run": { type: "boolean" },
@@ -460,12 +513,14 @@ const COMMANDS: Record<string, Command> = {
     async run({ values, positionals, client, deps }) {
       const key = v.noteKey(positionals[0]);
       const settings = publishSettings(values);
+      const membership = list(values.membership);
+      if (membership.length) settings.circlePermissions = circlePermissions(membership, await api.membershipAccess(client));
       const timeoutSec = int(values.timeout, "timeout");
       const input = positionals[1] ? await readArticleInput(positionals[1], values) : null;
 
       if (values["dry-run"]) {
         const note = input
-          ? { name: input.title, body: dryRunResult(input).html, slug: null }
+          ? { name: input.title, body: dryRunResult(input).html, slug: null, key }
           : await savedNote(client, key);
         return { dryRun: true, key, ...publishPreview(buildPublishPayload(note, settings)) };
       }
@@ -484,11 +539,11 @@ const COMMANDS: Record<string, Command> = {
       const extra: Record<string, unknown> = {};
       const warnings: string[] = [];
       if (input) {
-        const article = await uploadAndConvert(client, input);
+        const article = await uploadAndConvert(client, input, key);
         await api.saveDraft(client, id, article);
         const eyecatch = await applyEyecatch(client, id, input.eyecatch);
-        note = { name: article.title, body: article.html, slug: note.slug };
-        Object.assign(extra, imagesField(article.images, eyecatch));
+        note = { ...note, name: article.title, body: article.html };
+        Object.assign(extra, imagesField(article.images, eyecatch, article.embeds));
         warnings.push(...article.warnings, ...eyecatch.warnings);
       }
       const payload = buildPublishPayload(note, settings);
@@ -702,6 +757,16 @@ interface ArticleInput {
   /** Markdown image src -> the local file it points to (already read and validated). */
   images: Map<string, ImageFile>;
   eyecatch: ImageFile | null;
+  /** Bare URLs on their own line, to embed (empty with --no-embed). */
+  embedUrls: string[];
+  /** Markdown link href -> the local file to attach. */
+  attachments: Map<string, AttachmentFile>;
+}
+
+interface AttachmentFile {
+  path: string;
+  bytes: Uint8Array<ArrayBuffer>;
+  mimeType: string;
 }
 
 /**
@@ -734,8 +799,20 @@ async function readArticleInput(file: string, values: Values): Promise<ArticleIn
         ? resolveImagePath(parsed.frontmatter.eyecatch, baseDir)
         : null;
   const eyecatch = eyecatchPath ? await readImage(eyecatchPath) : null;
-  return { title, markdown: parsed.markdown, images, eyecatch };
+
+  const links = blockLinks(parsed.markdown);
+  const attachments = new Map<string, AttachmentFile>();
+  for (const href of links.files) {
+    const path = resolveImagePath(href, baseDir);
+    const info = await stat(path).catch(() => null);
+    if (!info?.isFile()) throw new CliError("INVALID_INPUT", `Cannot attach ${href}: no such file (${path}). A link alone on its line to a local file becomes a download attachment.`);
+    if (info.size > MAX_ATTACHMENT_BYTES) throw new CliError("INVALID_INPUT", `Cannot attach ${path}: larger than ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB.`);
+    attachments.set(href, { path, bytes: new Uint8Array(await readFile(path)), mimeType: attachmentMime(path) });
+  }
+  return { title, markdown: parsed.markdown, images, eyecatch, embedUrls: values["no-embed"] ? [] : links.urls, attachments };
 }
+
+const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 
 function dryRunResult(input: ArticleInput) {
   // Preview with the local paths as image sources; nothing is uploaded.
@@ -748,12 +825,18 @@ function dryRunResult(input: ArticleInput) {
     bodyLength,
     images: [...input.images].map(([src, f]) => ({ src, path: f.path, mimeType: f.mimeType, bytes: f.bytes.length })),
     eyecatch: input.eyecatch ? { path: input.eyecatch.path, mimeType: input.eyecatch.mimeType, bytes: input.eyecatch.bytes.length } : null,
-    warnings: [...warnings, ...(input.eyecatch ? [eyecatchRatioWarning(input.eyecatch)].filter((w): w is string => !!w) : [])],
+    ...(input.embedUrls.length ? { embeds: input.embedUrls.map((url) => ({ url, service: embedService(url) ?? "decided by note (link card or player)" })) } : {}),
+    ...(input.attachments.size ? { attachments: [...input.attachments.values()].map((f) => ({ path: f.path, mimeType: f.mimeType, bytes: f.bytes.length })) } : {}),
+    warnings: [
+      // Attachment links are uploaded on a real run; the preview leaves them as text.
+      ...warnings.filter((w) => ![...input.attachments.keys()].some((href) => w.startsWith(`Link "${href}"`))),
+      ...(input.eyecatch ? [eyecatchRatioWarning(input.eyecatch)].filter((w): w is string => !!w) : []),
+    ],
   };
 }
 
-/** Upload each distinct local image once, then convert the Markdown with the uploaded URLs. */
-async function uploadAndConvert(client: NoteClient, input: ArticleInput) {
+/** Upload each distinct local image once; returns Markdown src -> uploaded URL. */
+async function uploadImages(client: NoteClient, input: ArticleInput): Promise<Map<string, string>> {
   const urls = new Map<string, string>();
   const byPath = new Map<string, string>();
   for (const [src, file] of input.images) {
@@ -764,8 +847,47 @@ async function uploadAndConvert(client: NoteClient, input: ArticleInput) {
     }
     urls.set(src, url);
   }
-  const { html, bodyLength, warnings } = markdownToNoteHtml(input.markdown, { images: urls });
-  return { title: input.title, html, bodyLength, warnings, images: [...urls].map(([src, url]) => ({ src, url })) };
+  return urls;
+}
+
+/**
+ * Upload each distinct local image once (unless done already), create embeds and attachments on the draft, then convert
+ * the Markdown. Embeds and attachments belong to a draft, so they need its key; a failed one is
+ * reported as a warning and its line stays a plain link.
+ */
+async function uploadAndConvert(client: NoteClient, input: ArticleInput, noteKey: string | null, uploaded?: Map<string, string>) {
+  const urls = uploaded ?? (await uploadImages(client, input));
+  const embeds = new Map<string, Embed>();
+  const blockWarnings: string[] = [];
+  if (!noteKey && (input.embedUrls.length || input.attachments.size)) {
+    blockWarnings.push("Embeds and attachments were skipped because the draft was given by numeric id; pass its key (n...) instead.");
+  } else if (noteKey) {
+    for (const url of input.embedUrls) {
+      try {
+        embeds.set(url, await createEmbed(client, noteKey, url));
+      } catch (e) {
+        if (!(e instanceof CliError) || e.code === "NOT_LOGGED_IN" || e.code === "AUTH_ERROR") throw e;
+        blockWarnings.push(`Could not embed ${url} (${e.message}); left as a link.`);
+      }
+    }
+    for (const [href, file] of input.attachments) {
+      try {
+        embeds.set(href, await uploadAttachment(client, noteKey, file));
+      } catch (e) {
+        if (!(e instanceof CliError) || e.code === "NOT_LOGGED_IN" || e.code === "AUTH_ERROR") throw e;
+        blockWarnings.push(`Could not attach ${file.path} (${e.message}); dropped.`);
+      }
+    }
+  }
+  const { html, bodyLength, warnings } = markdownToNoteHtml(input.markdown, { images: urls, embeds });
+  return {
+    title: input.title,
+    html,
+    bodyLength,
+    warnings: [...blockWarnings, ...warnings],
+    images: [...urls].map(([src, url]) => ({ src, url })),
+    embeds: [...embeds.values()].map((e) => ({ service: e.service, url: e.url, key: e.key })),
+  };
 }
 
 interface EyecatchOutcome {
@@ -791,9 +913,10 @@ async function applyEyecatch(client: NoteClient, noteId: number, file: ImageFile
   }
 }
 
-function imagesField(images: Array<{ src: string; url: string }>, eyecatch: EyecatchOutcome) {
+function imagesField(images: Array<{ src: string; url: string }>, eyecatch: EyecatchOutcome, embeds: unknown[] = []) {
   return {
     ...(images.length ? { images } : {}),
+    ...(embeds.length ? { embeds } : {}),
     ...(eyecatch.result ? { eyecatch: eyecatch.result } : {}),
   };
 }
@@ -831,17 +954,58 @@ function publishSettings(values: Values): PublishSettings {
     toc: Boolean(values.toc),
     disableComments: Boolean(values["disable-comments"]),
     refund: Boolean(values.refund),
+    hideFromProfile: Boolean(values["hide-from-profile"]),
   };
 }
 
+/**
+ * --membership values -> note's `circle_permissions`: `all` = every member of your membership,
+ * plan keys = only those plans, `none` = take the article out of the membership.
+ */
+export function circlePermissions(choices: string[], access: api.MembershipAccess[]): CirclePermission[] {
+  if (choices.includes("none")) {
+    if (choices.length > 1) throw new CliError("USAGE", "--membership none cannot be combined with other values.");
+    return [];
+  }
+  const circle = access[0];
+  if (!circle) throw new CliError("FORBIDDEN", "You have no membership (メンバーシップ) to publish the article to.");
+  if (choices.includes("all")) {
+    if (choices.length > 1) throw new CliError("USAGE", "--membership all already covers every plan; do not list plans with it.");
+    return [{ kind: "circle", keys: [circle.circle.key] }];
+  }
+  const known = new Map(access.flatMap((a) => a.plans.map((p) => [p.key, p])));
+  const unknown = choices.filter((c) => !known.has(c));
+  if (unknown.length) {
+    const plans = [...known.values()].map((p) => `${p.key}${p.name ? ` (${p.name})` : ""}`).join(", ") || "none";
+    throw new CliError("USAGE", `Unknown membership plan: ${unknown.join(", ")}. Your plans: ${plans}.`);
+  }
+  return [{ kind: "circle_plan", keys: [...new Set(choices)] }];
+}
+
+function dashboardRangeFrom(values: Values) {
+  const period = oneOf(values.period, Object.keys(api.DASHBOARD_PERIODS), "period") as api.DashboardPeriod;
+  const date = (x: unknown, name: string) => {
+    if (x === undefined) return undefined;
+    if (typeof x !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(x) || Number.isNaN(new Date(x).getTime())) {
+      throw new CliError("USAGE", `--${name} must be a date like 2026-10-01.`);
+    }
+    return x;
+  };
+  const from = date(values.from, "from");
+  const to = date(values.to, "to");
+  if (period !== "custom" && (from || to)) throw new CliError("USAGE", "--from/--to only apply with --period custom.");
+  if (from && to && from > to) throw new CliError("USAGE", "--from must not be after --to.");
+  return api.dashboardRange(period, { from, to });
+}
+
 /** The title/body the editor currently holds (an article being re-edited keeps its edits in note_draft). */
-function noteFromDraft(data: any): { name: string; body: string; slug: string | null } {
+function noteFromDraft(data: any): { name: string; body: string; slug: string | null; key: string | null } {
   const draft = data?.note_draft ?? {};
   const name = draft.name ?? data?.name;
   const body = draft.body ?? data?.body;
   if (typeof name !== "string" || !name.trim()) throw new CliError("INVALID_INPUT", "The draft has no title; set one before publishing.");
   if (typeof body !== "string" || !body.trim()) throw new CliError("INVALID_INPUT", "The draft has no body; save content before publishing.");
-  return { name, body, slug: typeof data?.slug === "string" ? data.slug : null };
+  return { name, body, slug: typeof data?.slug === "string" ? data.slug : null, key: typeof data?.key === "string" ? data.key : null };
 }
 
 async function savedNote(client: NoteClient, key: string) {
@@ -862,6 +1026,8 @@ function publishPreview(p: ReturnType<typeof buildPublishPayload>) {
     disableComments: p.disable_comment,
     refund: p.is_refund,
     notify: p.send_notifications_flag,
+    hideFromProfile: p.exclude_from_creator_top,
+    ...(p.circle_permissions ? { membership: p.circle_permissions } : {}),
     bodyLength: p.body_length,
     freeLength: visibleTextLength(p.free_body),
     paidLength: visibleTextLength(p.pay_body),

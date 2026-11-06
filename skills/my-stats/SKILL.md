@@ -1,6 +1,6 @@
 ---
 name: my-stats
-description: Look at the logged-in user's own note.com numbers (page views, likes, comments per article) with the bundled note-cli. Use when the user asks how their note articles are doing, which posts get the most views, or wants to review their note performance.
+description: Look at the logged-in user's own note.com numbers (page views, impressions, likes, comments, sales, referrers, trends) with the bundled note-cli. Use when the user asks how their note articles are doing, which posts get the most views, or wants to review their note performance.
 ---
 
 # note-cli:my-stats
@@ -26,12 +26,18 @@ Output is JSON on stdout. Errors are JSON on stderr (`{"error": {"code", "messag
 
 ```bash
 note-cli auth status                                  # who is logged in
+note-cli stats dashboard [--period 7d|28d|365d|all|this-month|last-month] [--order pv|impressions|likes|comments|sales|published] [--limit 20]
+                                                      # totals, referrers and per-article numbers for the period (default 28d)
+note-cli stats dashboard --period custom --from 2026-10-01 --to 2026-10-31
+note-cli stats chart --metric pv|impressions|likes|comments|sales --period 28d   # one metric over time
 note-cli stats pv --filter all|daily|weekly|monthly|yearly --sort pv|like|comment --page 1
 note-cli analyze user <own urlname> --limit 100       # likes/title/timing breakdown of own posts
 note-cli draft list                                   # own articles incl. drafts
 ```
 
-`stats pv` returns note's raw response (per-article `read_count`, likes, comments plus totals). It is page-based (`--page N`); the response shape is unofficial, so inspect it before summarizing.
+`stats dashboard` is the same data as note's dashboard page: `totals` (`pageViews`, `impressions`, `likes`, `comments`, `sales` in yen), `referrers` (where readers came from: note.com, search engines, X, ChatGPT, ...) and `notes` with the same numbers per article. Impressions are `null` before May 2021. `lastUpdatedAt` says how fresh the numbers are (note updates them about daily). `--limit 0` skips the per-article list.
+
+`stats pv` returns note's older raw response (per-article `read_count`, likes, comments plus totals). It is page-based (`--page N`); the response shape is unofficial, so inspect it before summarizing.
 
 If not logged in, or on `AUTH_ERROR`, log in as described above.
 
@@ -39,4 +45,4 @@ If not logged in, or on `AUTH_ERROR`, log in as described above.
 
 - Lead with the totals for the period, then the top 5 articles by views, then anything surprising (high views but few likes, etc.).
 - Combine with `analyze user` to relate performance to title style and posting time; flag small samples.
-- The newer dashboard (impressions, referrers) uses an authenticated GraphQL API that note-cli does not support yet.
+- Use `stats dashboard` for the overview and `stats chart` to see whether a spike was one day or a trend. Compare impressions to page views (click-through) and point out referrers that grew.

@@ -37,11 +37,14 @@ note-cli publish <key|url> [file.md] --yes [options]  # -> {published: true, url
   --price <yen>          # 0 (free, default) or 100–50000; paid articles need a paywall (see below)
   --refund               # allow refunds on a paid article
   --magazine <key>       # add to your magazine on publish (repeatable)
+  --membership <v>       # membership-only article: `all` (every member), plan keys (repeatable), or `none` to remove it
+  --hide-from-profile    # keep it off your profile's article list (still reachable by URL, search and magazines)
   --toc                  # show a table of contents
   --disable-comments     # turn comments off (may need note premium)
   --no-notify            # do not send the subscriber notification
   --schedule <time>      # scheduled post, e.g. 2026-12-01T09:00+09:00 (needs note premium)
   --eyecatch <image>     # with a file: set the cover image (1280:670)
+  --no-embed             # with a file: keep bare URLs as links instead of embeds
 note-cli reserved                         # your scheduled articles
 note-cli unpublish <key|url> --yes        # back to draft (also cancels a scheduled post)
 note-cli delete <key|url> --yes           # delete for good (published ones are unpublished first)
@@ -51,6 +54,12 @@ note-cli magazine remove <magazineKey> <noteKey>
 ```
 
 Running `publish` on an already published article re-publishes it with the current draft content and the given settings (pass the hashtags again; they are replaced).
+
+Hashtags cannot contain spaces or dots: note silently drops *all* of an article's hashtags when one is invalid, so note-cli rejects them up front.
+
+## Membership articles
+
+`--membership all` publishes the article for every member of the user's membership; `--membership <planKey>` limits it to specific plans (`note-cli membership plans` lists keys). An unknown plan key fails with the list of valid ones. `--membership none` takes an article out of the membership; do that before trying to unpublish a membership article.
 
 ## Paid articles
 
