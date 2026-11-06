@@ -1,6 +1,6 @@
 ---
 name: engage
-description: Like, comment on and follow on note.com, and check notifications and memberships, with the bundled note-cli. Use when the user wants to like (スキ) a note article, post or delete a comment or reply, follow or unfollow a creator, see unread notification counts, or look at their membership plans.
+description: Like (スキ), comment and follow on note.com; notifications, memberships.
 ---
 
 # note-cli:engage

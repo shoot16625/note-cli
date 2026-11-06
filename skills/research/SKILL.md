@@ -1,6 +1,6 @@
 ---
 name: research
-description: Search note.com articles, creators, magazines and hashtags and analyze what performs well (likes, pricing, title patterns, posting time, top authors) with the bundled note-cli. Use for note market/competitor research, finding popular articles on a topic, hashtag or category, choosing hashtags, studying a creator or magazine, checking contests, or reading an article's text, likes and comments.
+description: Search and analyze note.com articles, creators, magazines, hashtags and contests.
 ---
 
 # note-cli:research

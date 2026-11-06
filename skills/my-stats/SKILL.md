@@ -1,6 +1,6 @@
 ---
 name: my-stats
-description: Look at the logged-in user's own note.com numbers (page views, impressions, likes, comments, sales, referrers, trends) with the bundled note-cli. Use when the user asks how their note articles are doing, which posts get the most views, or wants to review their note performance.
+description: The user's own note.com stats: views, likes, comments, sales, referrers.
 ---
 
 # note-cli:my-stats
