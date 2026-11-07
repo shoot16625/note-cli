@@ -1,6 +1,6 @@
 ---
 name: draft
-description: Save, update or read note.com drafts from Markdown (images, eyecatch, embeds, attachments).
+description: Save, update or read note.com drafts from Markdown (images, eyecatch, gallery photos, embeds, attachments).
 ---
 
 # note-cli:draft
@@ -36,6 +36,7 @@ note-cli draft update <key|url> article.md [--eyecatch cover.png]  # overwrite t
 note-cli draft get <key|url>                 # read a draft back as text (--html for raw, --max-chars N, default 20000)
 note-cli draft list --status draft           # your drafts (page 1; --page N)
 note-cli draft delete <id|key> --yes         # drafts only (published: `note-cli delete`); ask the user before running
+note-cli photo search 富士山 [--public-domain] [--limit N] [--page N]   # みんなのフォトギャラリー: free cover photos (login)
 ```
 
 ## Markdown → note conversion
@@ -50,6 +51,7 @@ note-cli draft delete <id|key> --yes         # drafts only (published: `note-cli
 - **Obsidian syntax**: `![[image.png]]` / `![[image.png|alt]]` are images, `[[Page|label]]` becomes its text, `==highlight==` becomes bold.
 - **Tables become code blocks**, with a warning.
 - **Eyecatch** (cover image): `--eyecatch <file>` or frontmatter `eyecatch: cover.png`. note only accepts a **1280:670** aspect ratio (e.g. 1280x670); `--dry-run` warns about other sizes. If note rejects it, the draft is still saved, `eyecatch.set` is false, and `warnings` explains why. Fix the image and rerun `draft update` with `--eyecatch`.
+- **Gallery eyecatch** (the editor's 記事にあう画像を選ぶ): when the user has no cover image, run `note-cli photo search <keywords from the article>` and choose by `keywords` and `sourceNote.title` (download a few `thumbnailUrl`s to look at them if you can view images). `--public-domain` searches museum artworks instead. Pass the chosen photo's `eyecatch` value (`stock:<id>:<url>`) to `--eyecatch` or frontmatter `eyecatch:`. It is center-cropped to 1280x670 and note shows the `credit` under the cover automatically. Tell the user which photo you picked and whose it is.
 - A line containing only `<!-- paywall -->` marks where the paid part of a paid article starts (it shows as the paywall line in the editor).
 - Hashtags, price and magazines are set when publishing (`note-cli publish`, see `note-cli:publish`).
 

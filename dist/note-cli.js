@@ -301,6 +301,23 @@ class NoteClient {
     }
     return res;
   }
+  async download(url) {
+    const target = new URL(url);
+    if (target.protocol !== "https:")
+      throw new CliError("API_ERROR", `Refusing to download from a non-https URL: ${url}`);
+    await this.throttle();
+    if (process.env.NOTE_CLI_DEBUG)
+      console.error(`[note-cli] GET ${target.origin}${target.pathname}`);
+    let res;
+    try {
+      res = await this.fetchImpl(target, { method: "GET", headers: { "User-Agent": USER_AGENT } });
+    } catch (e) {
+      throw new CliError("NETWORK_ERROR", `Download failed: ${e.message}`);
+    }
+    if (!res.ok)
+      throw new CliError("API_ERROR", `Download of ${target.origin}${target.pathname} failed: HTTP ${res.status}.`, { status: res.status });
+    return { bytes: new Uint8Array(await res.arrayBuffer()), contentType: res.headers.get("content-type") };
+  }
   async throttle() {
     const wait = this.lastRequestAt + this.minIntervalMs - Date.now();
     if (wait > 0)
@@ -321,6 +338,125 @@ function errorMessage(data) {
   if (!raw)
     return null;
   return raw.replace(/<br\s*\/?>/gi, " ").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 300);
+}
+
+// src/images.ts
+import { readFile as readFile2, stat } from "fs/promises";
+import { basename, isAbsolute, resolve } from "path";
+var MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+function sniffImageType(bytes) {
+  const b = bytes;
+  if (b.length >= 8 && b[0] === 137 && b[1] === 80 && b[2] === 78 && b[3] === 71)
+    return "image/png";
+  if (b.length >= 3 && b[0] === 255 && b[1] === 216 && b[2] === 255)
+    return "image/jpeg";
+  if (b.length >= 6 && b[0] === 71 && b[1] === 73 && b[2] === 70 && b[3] === 56)
+    return "image/gif";
+  if (b.length >= 12 && String.fromCharCode(b[0], b[1], b[2], b[3]) === "RIFF" && String.fromCharCode(b[8], b[9], b[10], b[11]) === "WEBP") {
+    return "image/webp";
+  }
+  return null;
+}
+function isLocalImageRef(src) {
+  const s = src.trim();
+  if (!s || s.startsWith("//"))
+    return false;
+  return !/^[a-z][a-z0-9+.-]*:/i.test(s) || /^file:\/\//i.test(s);
+}
+function resolveImagePath(src, baseDir) {
+  let s = src.trim();
+  if (/^file:\/\//i.test(s))
+    s = new URL(s).pathname;
+  try {
+    s = decodeURI(s);
+  } catch {}
+  return isAbsolute(s) ? s : resolve(baseDir, s);
+}
+async function readImage(path) {
+  const info = await stat(path).catch((e) => {
+    throw new CliError("INVALID_INPUT", `Cannot read image ${path}: ${e.message}`);
+  });
+  if (!info.isFile())
+    throw new CliError("INVALID_INPUT", `Not a file: ${path}`);
+  if (info.size > MAX_IMAGE_BYTES) {
+    throw new CliError("INVALID_INPUT", `Image ${path} is ${(info.size / 1024 / 1024).toFixed(1)} MB; note accepts up to 10 MB.`);
+  }
+  const bytes = new Uint8Array(await readFile2(path));
+  const mimeType = sniffImageType(bytes);
+  if (!mimeType)
+    throw new CliError("INVALID_INPUT", `Unsupported image type: ${path} (use PNG, JPEG, GIF or WebP).`);
+  return { path, filename: basename(path), mimeType, bytes };
+}
+var EYECATCH_RATIO = 1280 / 670;
+function imageSize(bytes) {
+  const type = sniffImageType(bytes);
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  try {
+    if (type === "image/png")
+      return { width: dv.getUint32(16), height: dv.getUint32(20) };
+    if (type === "image/gif")
+      return { width: dv.getUint16(6, true), height: dv.getUint16(8, true) };
+    if (type === "image/webp") {
+      const chunk = String.fromCharCode(bytes[12], bytes[13], bytes[14], bytes[15]);
+      if (chunk === "VP8X") {
+        const w = 1 + (bytes[24] | bytes[25] << 8 | bytes[26] << 16);
+        const h = 1 + (bytes[27] | bytes[28] << 8 | bytes[29] << 16);
+        return { width: w, height: h };
+      }
+      if (chunk === "VP8 ")
+        return { width: dv.getUint16(26, true) & 16383, height: dv.getUint16(28, true) & 16383 };
+      if (chunk === "VP8L") {
+        const b = dv.getUint32(21, true);
+        return { width: (b & 16383) + 1, height: (b >> 14 & 16383) + 1 };
+      }
+      return null;
+    }
+    if (type === "image/jpeg") {
+      let i = 2;
+      while (i + 9 < bytes.length) {
+        if (bytes[i] !== 255)
+          return null;
+        const marker = bytes[i + 1];
+        const len = dv.getUint16(i + 2);
+        if (marker >= 192 && marker <= 207 && ![196, 200, 204].includes(marker)) {
+          return { width: dv.getUint16(i + 7), height: dv.getUint16(i + 5) };
+        }
+        i += 2 + len;
+      }
+    }
+  } catch {}
+  return null;
+}
+function eyecatchRatioWarning(image) {
+  const size = imageSize(image.bytes);
+  if (!size || !size.height)
+    return null;
+  const ratio = size.width / size.height;
+  if (Math.abs(ratio - EYECATCH_RATIO) / EYECATCH_RATIO <= 0.01)
+    return null;
+  return `Eyecatch ${image.filename} is ${size.width}x${size.height}; note requires a 1280:670 aspect ratio (e.g. 1280x670) and will likely reject it.`;
+}
+var STOCK_PREFIX = "stock:";
+var STOCK_HOST = "assets.st-note.com";
+function stockPhotoRef(stockPhotoImageId, url) {
+  return `${STOCK_PREFIX}${stockPhotoImageId}:${url}`;
+}
+function isStockPhotoRef(value) {
+  return value.trim().startsWith(STOCK_PREFIX);
+}
+function parseStockPhotoRef(value) {
+  const m = /^stock:(\d+):(https:\/\/\S+)$/.exec(value.trim());
+  const url = m ? URL.parse(m[2]) : null;
+  if (!m || !url || url.hostname !== STOCK_HOST) {
+    throw new CliError("INVALID_INPUT", `Not a gallery photo reference: ${value}. Use the \`eyecatch\` value printed by \`note-cli photo search\` (stock:<id>:https://${STOCK_HOST}/...).`);
+  }
+  url.search = "";
+  return { stockPhotoImageId: Number(m[1]), url: url.toString() };
+}
+function stockPhotoCropUrl(url) {
+  const u = new URL(url);
+  u.search = new URLSearchParams({ width: "1280", height: "670", fit: "crop", format: "jpeg", quality: "95" }).toString();
+  return u.toString();
 }
 
 // src/markdown.ts
@@ -2511,13 +2647,20 @@ async function createDraft(client, title) {
   }
   return { id: Number(id), key, editUrl: editUrl(key) };
 }
-async function saveDraft(client, id, body) {
+async function saveDraft(client, id, body, opts = {}) {
   const res = await client.request("/v1/text_notes/draft_save", {
     method: "POST",
     auth: "required",
     editor: true,
     query: { id },
-    json: { name: body.title, body: body.html, body_length: body.bodyLength, index: false, is_lead_form: false }
+    json: {
+      name: body.title,
+      body: body.html,
+      body_length: body.bodyLength,
+      index: false,
+      is_lead_form: false,
+      ...opts.stockPhotoImageId ? { stock_photo_image_id: opts.stockPhotoImageId } : {}
+    }
   });
   return res?.data ?? res;
 }
@@ -2579,6 +2722,49 @@ async function setEyecatch(client, noteId, image) {
   const d = res?.data ?? res;
   const url = d?.url ?? d?.eyecatch_url ?? d?.eyecatch ?? null;
   return { url: typeof url === "string" ? url : null };
+}
+async function searchStockPhotos(client, opts) {
+  const res = await client.request("/v2/stock_photo_images", {
+    auth: "required",
+    query: { page: opts.page, query: opts.query, size: opts.size, public_domain_only: opts.publicDomainOnly }
+  });
+  const d = res?.data ?? {};
+  const rows = Array.isArray(d.contents) ? d.contents : [];
+  const items = [];
+  const skipped = [];
+  for (const [index, x2] of rows.entries()) {
+    const id = Number(x2?.stockPhotoImageId ?? x2?.stock_photo_image_id);
+    const original = x2?.url?.original;
+    if (!Number.isInteger(id) || id <= 0 || typeof original !== "string") {
+      skipped.push({ index, reason: "missing stockPhotoImageId or url.original" });
+      continue;
+    }
+    const pd = (x2.isPublicDomainImage ?? x2.is_public_domain_image) === true;
+    const art = x2.publicDomainImageDetail ?? x2.public_domain_image_detail ?? {};
+    const artwork = pd ? { title: art.title ?? null, artistName: art.artistName ?? art.artist_name ?? null, museumName: art.museumName ?? art.museum_name ?? null } : null;
+    const creator = !pd && x2.user?.urlname ? { urlname: String(x2.user.urlname), nickname: x2.user.nickname ?? null } : null;
+    items.push({
+      eyecatch: stockPhotoRef(id, original.split("?")[0]),
+      stockPhotoImageId: id,
+      thumbnailUrl: x2.url.stockPhotoThumb ?? x2.url.stock_photo_thumb ?? x2.url.imageUrl ?? null,
+      originalUrl: original,
+      width: typeof x2.size?.width === "number" ? x2.size.width : null,
+      height: typeof x2.size?.height === "number" ? x2.size.height : null,
+      keywords: Array.isArray(x2.keywords) ? x2.keywords.map((k) => k?.text).filter((t) => typeof t === "string") : [],
+      credit: artwork ? [artwork.artistName, artwork.museumName].filter(Boolean).join(" / ") || null : creator?.urlname ?? null,
+      creator,
+      artwork,
+      sourceNote: !pd && x2.note?.key ? { key: String(x2.note.key), title: x2.note.name ?? null } : null
+    });
+  }
+  return { items, isLastPage: typeof d.isLastPage === "boolean" ? d.isLastPage : d.is_last_page ?? null, skipped };
+}
+async function downloadStockPhoto(client, ref) {
+  const { bytes } = await client.download(stockPhotoCropUrl(ref.url));
+  const mimeType = sniffImageType(bytes);
+  if (!mimeType)
+    throw new CliError("API_ERROR", `The gallery photo ${ref.url} did not download as an image.`);
+  return { path: ref.url, filename: `stock-${ref.stockPhotoImageId}.jpg`, mimeType, bytes, stockPhotoImageId: ref.stockPhotoImageId };
 }
 var write = (client, path, method, json) => client.request(path, { method, auth: "required", ...json !== undefined ? { json } : {} });
 async function likeNote(client, key, like) {
@@ -2791,7 +2977,7 @@ async function dashboardChart(client, range, metric) {
 }
 
 // src/embeds.ts
-import { basename } from "path";
+import { basename as basename2 } from "path";
 var SERVICES = Object.entries({
   instagram: String.raw`^https://www\.instagram\.com\/(p|reel)\/[0-9a-zA-Z\-_]+/?`,
   twitter: String.raw`^https://(?:(?:mobile\.)?twitter\.com|(?:mobile\.)?x\.com)\/[a-zA-Z0-9_]+\/status\/[0-9]+(\?.+)?`,
@@ -2866,7 +3052,7 @@ async function createEmbed(client, noteKey, url) {
   return { service, key, url, identifier: null, html: null };
 }
 async function uploadAttachment(client, noteKey, file) {
-  const name = basename(file.path);
+  const name = basename2(file.path);
   const form = new FormData;
   form.append("file", new Blob([file.bytes], { type: file.mimeType }), name);
   form.append("file_name", name);
@@ -2903,7 +3089,7 @@ function attachmentMime(path) {
 // src/browser.ts
 import { spawn } from "child_process";
 import { existsSync } from "fs";
-import { mkdtemp, readFile as readFile2, rm as rm2 } from "fs/promises";
+import { mkdtemp, readFile as readFile3, rm as rm2 } from "fs/promises";
 import { tmpdir } from "os";
 import { join as join2 } from "path";
 function browserCandidates() {
@@ -2953,16 +3139,16 @@ class Cdp {
     });
   }
   static connect(url) {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       const ws = new WebSocket(url);
-      ws.addEventListener("open", () => resolve(new Cdp(ws)), { once: true });
+      ws.addEventListener("open", () => resolve2(new Cdp(ws)), { once: true });
       ws.addEventListener("error", () => reject(new Error(`Cannot connect to ${url}`)), { once: true });
     });
   }
   send(method, params = {}, sessionId) {
     const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+    return new Promise((resolve2, reject) => {
+      this.pending.set(id, { resolve: resolve2, reject });
       this.ws.send(JSON.stringify({ id, method, params, ...sessionId ? { sessionId } : {} }));
     });
   }
@@ -2978,7 +3164,7 @@ async function waitForDevToolsPort(profileDir, proc, timeoutMs = 20000) {
     if (proc.exitCode !== null)
       throw new CliError("BROWSER_LAUNCH_FAILED", "Browser exited before it was ready.");
     try {
-      const [port, path] = (await readFile2(file, "utf8")).trim().split(`
+      const [port, path] = (await readFile3(file, "utf8")).trim().split(`
 `);
       if (port && path)
         return `ws://127.0.0.1:${port}${path}`;
@@ -3035,103 +3221,6 @@ async function browserLogin(opts) {
   } finally {
     await close();
   }
-}
-
-// src/images.ts
-import { readFile as readFile3, stat } from "fs/promises";
-import { basename as basename2, isAbsolute, resolve } from "path";
-var MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-function sniffImageType(bytes) {
-  const b = bytes;
-  if (b.length >= 8 && b[0] === 137 && b[1] === 80 && b[2] === 78 && b[3] === 71)
-    return "image/png";
-  if (b.length >= 3 && b[0] === 255 && b[1] === 216 && b[2] === 255)
-    return "image/jpeg";
-  if (b.length >= 6 && b[0] === 71 && b[1] === 73 && b[2] === 70 && b[3] === 56)
-    return "image/gif";
-  if (b.length >= 12 && String.fromCharCode(b[0], b[1], b[2], b[3]) === "RIFF" && String.fromCharCode(b[8], b[9], b[10], b[11]) === "WEBP") {
-    return "image/webp";
-  }
-  return null;
-}
-function isLocalImageRef(src) {
-  const s = src.trim();
-  if (!s || s.startsWith("//"))
-    return false;
-  return !/^[a-z][a-z0-9+.-]*:/i.test(s) || /^file:\/\//i.test(s);
-}
-function resolveImagePath(src, baseDir) {
-  let s = src.trim();
-  if (/^file:\/\//i.test(s))
-    s = new URL(s).pathname;
-  try {
-    s = decodeURI(s);
-  } catch {}
-  return isAbsolute(s) ? s : resolve(baseDir, s);
-}
-async function readImage(path) {
-  const info = await stat(path).catch((e) => {
-    throw new CliError("INVALID_INPUT", `Cannot read image ${path}: ${e.message}`);
-  });
-  if (!info.isFile())
-    throw new CliError("INVALID_INPUT", `Not a file: ${path}`);
-  if (info.size > MAX_IMAGE_BYTES) {
-    throw new CliError("INVALID_INPUT", `Image ${path} is ${(info.size / 1024 / 1024).toFixed(1)} MB; note accepts up to 10 MB.`);
-  }
-  const bytes = new Uint8Array(await readFile3(path));
-  const mimeType = sniffImageType(bytes);
-  if (!mimeType)
-    throw new CliError("INVALID_INPUT", `Unsupported image type: ${path} (use PNG, JPEG, GIF or WebP).`);
-  return { path, filename: basename2(path), mimeType, bytes };
-}
-var EYECATCH_RATIO = 1280 / 670;
-function imageSize(bytes) {
-  const type = sniffImageType(bytes);
-  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  try {
-    if (type === "image/png")
-      return { width: dv.getUint32(16), height: dv.getUint32(20) };
-    if (type === "image/gif")
-      return { width: dv.getUint16(6, true), height: dv.getUint16(8, true) };
-    if (type === "image/webp") {
-      const chunk = String.fromCharCode(bytes[12], bytes[13], bytes[14], bytes[15]);
-      if (chunk === "VP8X") {
-        const w2 = 1 + (bytes[24] | bytes[25] << 8 | bytes[26] << 16);
-        const h = 1 + (bytes[27] | bytes[28] << 8 | bytes[29] << 16);
-        return { width: w2, height: h };
-      }
-      if (chunk === "VP8 ")
-        return { width: dv.getUint16(26, true) & 16383, height: dv.getUint16(28, true) & 16383 };
-      if (chunk === "VP8L") {
-        const b = dv.getUint32(21, true);
-        return { width: (b & 16383) + 1, height: (b >> 14 & 16383) + 1 };
-      }
-      return null;
-    }
-    if (type === "image/jpeg") {
-      let i = 2;
-      while (i + 9 < bytes.length) {
-        if (bytes[i] !== 255)
-          return null;
-        const marker = bytes[i + 1];
-        const len = dv.getUint16(i + 2);
-        if (marker >= 192 && marker <= 207 && ![196, 200, 204].includes(marker)) {
-          return { width: dv.getUint16(i + 7), height: dv.getUint16(i + 5) };
-        }
-        i += 2 + len;
-      }
-    }
-  } catch {}
-  return null;
-}
-function eyecatchRatioWarning(image) {
-  const size = imageSize(image.bytes);
-  if (!size || !size.height)
-    return null;
-  const ratio = size.width / size.height;
-  if (Math.abs(ratio - EYECATCH_RATIO) / EYECATCH_RATIO <= 0.01)
-    return null;
-  return `Eyecatch ${image.filename} is ${size.width}x${size.height}; note requires a 1280:670 aspect ratio (e.g. 1280x670) and will likely reject it.`;
 }
 
 // src/publish.ts
@@ -3422,14 +3511,14 @@ var COMMANDS = {
     options: { title: { type: "string" }, eyecatch: { type: "string" }, "no-embed": { type: "boolean" }, "dry-run": { type: "boolean" } },
     args: 1,
     async run({ values, positionals, client }) {
-      const input = await readArticleInput(positionals[0], values);
+      const input = await readArticleInput(positionals[0], values, client);
       if (values["dry-run"])
         return dryRunResult(input);
       const imageUrls = await uploadImages(client, input);
       const draft = await createDraft(client, input.title);
       const article = await uploadAndConvert(client, input, draft.key, imageUrls);
       await saveDraft(client, draft.id, article);
-      const eyecatch = await applyEyecatch(client, draft.id, input.eyecatch);
+      const eyecatch = await applyEyecatch(client, draft.id, input.eyecatch, article);
       return {
         created: true,
         ...draft,
@@ -3447,13 +3536,13 @@ var COMMANDS = {
     args: 2,
     async run({ values, positionals, client }) {
       const ref = noteIdOrKey(positionals[0]);
-      const input = await readArticleInput(positionals[1], values);
+      const input = await readArticleInput(positionals[1], values, client);
       if (values["dry-run"])
         return dryRunResult(input);
       const { id, key } = await resolveNoteId(client, ref);
       const article = await uploadAndConvert(client, input, key);
       await saveDraft(client, id, article);
-      const eyecatch = await applyEyecatch(client, id, input.eyecatch);
+      const eyecatch = await applyEyecatch(client, id, input.eyecatch, article);
       return {
         updated: true,
         id,
@@ -3511,6 +3600,35 @@ var COMMANDS = {
       const { id, key } = await resolveNoteId(client, ref);
       await deleteDraft(client, id);
       return { deleted: true, id, key };
+    }
+  },
+  "photo search": {
+    usage: "photo search [keyword...] [--public-domain] [--limit <n>] [--page <n>]",
+    summary: "Search \u307F\u3093\u306A\u306E\u30D5\u30A9\u30C8\u30AE\u30E3\u30E9\u30EA\u30FC (free photos for covers, as in the editor's \u8A18\u4E8B\u306B\u3042\u3046\u753B\u50CF\u3092\u9078\u3076); pass an item's `eyecatch` to --eyecatch",
+    options: {
+      "public-domain": { type: "boolean" },
+      limit: { type: "string", default: "20" },
+      page: { type: "string", default: "1" }
+    },
+    async run({ values, positionals, client }) {
+      const query = positionals.join(" ").trim();
+      const size = int(values.limit, "limit");
+      const page = int(values.page, "page");
+      if (size < 1 || size > 100)
+        throw new CliError("USAGE", "--limit must be between 1 and 100.");
+      if (page < 1)
+        throw new CliError("USAGE", "--page must be 1 or more.");
+      const publicDomainOnly = values["public-domain"] === true;
+      const res = await searchStockPhotos(client, { query, page, size, publicDomainOnly });
+      return {
+        query,
+        ...publicDomainOnly ? { publicDomainOnly } : {},
+        page,
+        count: res.items.length,
+        isLastPage: res.isLastPage,
+        photos: res.items,
+        ...skippedField(res.skipped)
+      };
     }
   },
   search: {
@@ -3830,7 +3948,7 @@ var COMMANDS = {
       if (membership.length)
         settings.circlePermissions = circlePermissions(membership, await membershipAccess(client));
       const timeoutSec = int(values.timeout, "timeout");
-      const input = positionals[1] ? await readArticleInput(positionals[1], values) : null;
+      const input = positionals[1] ? await readArticleInput(positionals[1], values, client) : null;
       if (values["dry-run"]) {
         const note2 = input ? { name: input.title, body: dryRunResult(input).html, slug: null, key } : await savedNote(client, key);
         return { dryRun: true, key, ...publishPreview(buildPublishPayload(note2, settings)) };
@@ -3852,7 +3970,7 @@ var COMMANDS = {
       if (input) {
         const article = await uploadAndConvert(client, input, key);
         await saveDraft(client, id, article);
-        const eyecatch = await applyEyecatch(client, id, input.eyecatch);
+        const eyecatch = await applyEyecatch(client, id, input.eyecatch, article);
         note = { ...note, name: article.title, body: article.html };
         Object.assign(extra, imagesField(article.images, eyecatch, article.embeds));
         warnings.push(...article.warnings, ...eyecatch.warnings);
@@ -4056,7 +4174,7 @@ async function finishLogin(cookies) {
   const path = await saveSession({ cookies, urlname: me.urlname, userId: me.id, savedAt: new Date().toISOString() });
   return { loggedIn: true, urlname: me.urlname, nickname: me.nickname, sessionPath: path };
 }
-async function readArticleInput(file, values) {
+async function readArticleInput(file, values, client) {
   const source = file === "-" ? await readStdin() : await readFile4(file, "utf8").catch((e) => {
     throw new CliError("INVALID_INPUT", `Cannot read ${file}: ${e.message}`);
   });
@@ -4073,8 +4191,9 @@ async function readArticleInput(file, values) {
     byPath.set(path, image);
     images.set(src, image);
   }
-  const eyecatchPath = typeof values.eyecatch === "string" ? resolve2(values.eyecatch) : parsed.frontmatter.eyecatch ? resolveImagePath(parsed.frontmatter.eyecatch, baseDir) : null;
-  const eyecatch = eyecatchPath ? await readImage(eyecatchPath) : null;
+  const eyecatchFlag = typeof values.eyecatch === "string" ? values.eyecatch : null;
+  const eyecatchSpec = eyecatchFlag ?? parsed.frontmatter.eyecatch ?? null;
+  const eyecatch = !eyecatchSpec ? null : isStockPhotoRef(eyecatchSpec) ? await downloadStockPhoto(client, parseStockPhotoRef(eyecatchSpec)) : await readImage(eyecatchFlag ? resolve2(eyecatchFlag) : resolveImagePath(eyecatchSpec, baseDir));
   const links = blockLinks(parsed.markdown);
   const attachments = new Map;
   for (const href of links.files) {
@@ -4098,7 +4217,12 @@ function dryRunResult(input) {
     html,
     bodyLength,
     images: [...input.images].map(([src, f]) => ({ src, path: f.path, mimeType: f.mimeType, bytes: f.bytes.length })),
-    eyecatch: input.eyecatch ? { path: input.eyecatch.path, mimeType: input.eyecatch.mimeType, bytes: input.eyecatch.bytes.length } : null,
+    eyecatch: input.eyecatch ? {
+      path: input.eyecatch.path,
+      mimeType: input.eyecatch.mimeType,
+      bytes: input.eyecatch.bytes.length,
+      ...input.eyecatch.stockPhotoImageId ? { stockPhotoImageId: input.eyecatch.stockPhotoImageId } : {}
+    } : null,
     ...input.embedUrls.length ? { embeds: input.embedUrls.map((url) => ({ url, service: embedService(url) ?? "decided by note (link card or player)" })) } : {},
     ...input.attachments.size ? { attachments: [...input.attachments.values()].map((f) => ({ path: f.path, mimeType: f.mimeType, bytes: f.bytes.length })) } : {},
     warnings: [
@@ -4156,18 +4280,32 @@ async function uploadAndConvert(client, input, noteKey2, uploaded) {
     embeds: [...embeds.values()].map((e) => ({ service: e.service, url: e.url, key: e.key }))
   };
 }
-async function applyEyecatch(client, noteId, file) {
+async function applyEyecatch(client, noteId, file, article) {
   if (!file)
     return { result: null, warnings: [] };
+  const stock = file.stockPhotoImageId ? { stockPhotoImageId: file.stockPhotoImageId } : {};
+  let url;
   try {
-    const { url } = await setEyecatch(client, noteId, file);
-    return { result: { path: file.path, set: true, url }, warnings: [] };
+    ({ url } = await setEyecatch(client, noteId, file));
   } catch (e) {
     if (!(e instanceof CliError) || e.code === "NOT_LOGGED_IN")
       throw e;
     return {
-      result: { path: file.path, set: false, url: null },
+      result: { path: file.path, set: false, url: null, ...stock },
       warnings: [`${e.message} The draft was saved without an eyecatch; fix the image and run \`draft update\` with --eyecatch.`]
+    };
+  }
+  if (!file.stockPhotoImageId)
+    return { result: { path: file.path, set: true, url }, warnings: [] };
+  try {
+    await saveDraft(client, noteId, article, stock);
+    return { result: { path: file.path, set: true, url, ...stock }, warnings: [] };
+  } catch (e) {
+    if (!(e instanceof CliError) || e.code === "NOT_LOGGED_IN")
+      throw e;
+    return {
+      result: { path: file.path, set: true, url },
+      warnings: [`The gallery photo is the eyecatch, but crediting its creator failed (${e.message}). Rerun \`draft update\` with the same --eyecatch.`]
     };
   }
 }

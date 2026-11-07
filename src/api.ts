@@ -1,5 +1,5 @@
 import { CliError, EDITOR_ORIGIN, type NoteClient } from "./client.ts";
-import type { ImageFile } from "./images.ts";
+import { sniffImageType, stockPhotoCropUrl, stockPhotoRef, type ImageFile, type StockPhotoRef } from "./images.ts";
 import {
   normalizeNotes,
   normalizeRows,
@@ -385,13 +385,22 @@ export async function saveDraft(
   client: NoteClient,
   id: number,
   body: { title: string; html: string; bodyLength: number },
+  /** Credit a gallery photo as the eyecatch. note only keeps it once the eyecatch is set. */
+  opts: { stockPhotoImageId?: number } = {},
 ): Promise<unknown> {
   const res = await client.request("/v1/text_notes/draft_save", {
     method: "POST",
     auth: "required",
     editor: true,
     query: { id },
-    json: { name: body.title, body: body.html, body_length: body.bodyLength, index: false, is_lead_form: false },
+    json: {
+      name: body.title,
+      body: body.html,
+      body_length: body.bodyLength,
+      index: false,
+      is_lead_form: false,
+      ...(opts.stockPhotoImageId ? { stock_photo_image_id: opts.stockPhotoImageId } : {}),
+    },
   });
   return res?.data ?? res;
 }
@@ -483,6 +492,73 @@ export async function setEyecatch(
   const d = res?.data ?? res;
   const url = d?.url ?? d?.eyecatch_url ?? d?.eyecatch ?? null;
   return { url: typeof url === "string" ? url : null };
+}
+
+// ---------- みんなのフォトギャラリー ----------
+
+export interface StockPhoto {
+  /** Pass this to --eyecatch (or frontmatter `eyecatch:`) to use the photo as the cover. */
+  eyecatch: string;
+  stockPhotoImageId: number;
+  thumbnailUrl: string | null;
+  originalUrl: string;
+  width: number | null;
+  height: number | null;
+  keywords: string[];
+  /** Who note credits under the cover: the creator's urlname, or "artist / museum" for public-domain art. */
+  credit: string | null;
+  creator: { urlname: string; nickname: string | null } | null;
+  artwork: { title: string | null; artistName: string | null; museumName: string | null } | null;
+  sourceNote: { key: string; title: string | null } | null;
+}
+
+/** Search みんなのフォトギャラリー, the free photos the editor's 記事にあう画像を選ぶ offers. Needs login. */
+export async function searchStockPhotos(
+  client: NoteClient,
+  opts: { query: string; page: number; size: number; publicDomainOnly: boolean },
+): Promise<{ items: StockPhoto[]; isLastPage: boolean | null; skipped: Skipped[] }> {
+  const res = await client.request("/v2/stock_photo_images", {
+    auth: "required",
+    query: { page: opts.page, query: opts.query, size: opts.size, public_domain_only: opts.publicDomainOnly },
+  });
+  const d = res?.data ?? {};
+  const rows: any[] = Array.isArray(d.contents) ? d.contents : [];
+  const items: StockPhoto[] = [];
+  const skipped: Skipped[] = [];
+  for (const [index, x] of rows.entries()) {
+    const id = Number(x?.stockPhotoImageId ?? x?.stock_photo_image_id);
+    const original = x?.url?.original;
+    if (!Number.isInteger(id) || id <= 0 || typeof original !== "string") {
+      skipped.push({ index, reason: "missing stockPhotoImageId or url.original" });
+      continue;
+    }
+    const pd = (x.isPublicDomainImage ?? x.is_public_domain_image) === true;
+    const art = x.publicDomainImageDetail ?? x.public_domain_image_detail ?? {};
+    const artwork = pd ? { title: art.title ?? null, artistName: art.artistName ?? art.artist_name ?? null, museumName: art.museumName ?? art.museum_name ?? null } : null;
+    const creator = !pd && x.user?.urlname ? { urlname: String(x.user.urlname), nickname: x.user.nickname ?? null } : null;
+    items.push({
+      eyecatch: stockPhotoRef(id, original.split("?")[0]),
+      stockPhotoImageId: id,
+      thumbnailUrl: x.url.stockPhotoThumb ?? x.url.stock_photo_thumb ?? x.url.imageUrl ?? null,
+      originalUrl: original,
+      width: typeof x.size?.width === "number" ? x.size.width : null,
+      height: typeof x.size?.height === "number" ? x.size.height : null,
+      keywords: Array.isArray(x.keywords) ? x.keywords.map((k: any) => k?.text).filter((t: unknown): t is string => typeof t === "string") : [],
+      credit: artwork ? [artwork.artistName, artwork.museumName].filter(Boolean).join(" / ") || null : (creator?.urlname ?? null),
+      creator,
+      artwork,
+      sourceNote: !pd && x.note?.key ? { key: String(x.note.key), title: x.note.name ?? null } : null,
+    });
+  }
+  return { items, isLastPage: typeof d.isLastPage === "boolean" ? d.isLastPage : (d.is_last_page ?? null), skipped };
+}
+
+/** Download a gallery photo, center-cropped to note's 1280x670 eyecatch size by its image CDN. */
+export async function downloadStockPhoto(client: NoteClient, ref: StockPhotoRef): Promise<ImageFile> {
+  const { bytes } = await client.download(stockPhotoCropUrl(ref.url));
+  const mimeType = sniffImageType(bytes);
+  if (!mimeType) throw new CliError("API_ERROR", `The gallery photo ${ref.url} did not download as an image.`);
+  return { path: ref.url, filename: `stock-${ref.stockPhotoImageId}.jpg`, mimeType, bytes, stockPhotoImageId: ref.stockPhotoImageId };
 }
 
 // ---------- actions (authenticated) ----------

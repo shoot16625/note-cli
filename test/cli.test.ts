@@ -15,7 +15,10 @@ interface Call {
   body: any;
 }
 
-function fakeClient(responses: Array<{ status?: number; body: unknown; headers?: [string, string][] }>, cookies: Record<string, string> | null) {
+function fakeClient(
+  responses: Array<{ status?: number; body: unknown; headers?: [string, string][]; raw?: Uint8Array<ArrayBuffer> }>,
+  cookies: Record<string, string> | null,
+) {
   const calls: Call[] = [];
   const fetchImpl = (async (input: URL, init: RequestInit) => {
     calls.push({
@@ -25,7 +28,7 @@ function fakeClient(responses: Array<{ status?: number; body: unknown; headers?:
       body: init.body instanceof FormData ? init.body : init.body ? JSON.parse(String(init.body)) : undefined,
     });
     const r = responses.shift() ?? { body: {} };
-    return new Response(JSON.stringify(r.body), { status: r.status ?? 200, headers: r.headers });
+    return new Response(r.raw ?? JSON.stringify(r.body), { status: r.status ?? 200, headers: r.headers });
   }) as unknown as typeof fetch;
   const client = new NoteClient({
     session: cookies ? { cookies, savedAt: "test" } : null,
@@ -215,7 +218,7 @@ test("invalid hashtag is rejected before any request", async () => {
   assert.equal(calls.length, 0);
 });
 
-function pngBytes(width: number, height: number): Uint8Array {
+function pngBytes(width: number, height: number): Uint8Array<ArrayBuffer> {
   const b = new Uint8Array(33);
   b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
   new DataView(b.buffer).setUint32(16, width);
@@ -666,4 +669,120 @@ test("publish --membership maps all/plans/none to circle_permissions", async () 
   assert.deepEqual(pub.calls[0].payload.circle_permissions, [{ kind: "circle_plan", keys: ["p1"] }]);
   assert.equal(pub.calls[0].payload.exclude_from_creator_top, true);
   assert.equal(pub.calls[0].payload.slug, "slug-nabcdef123456");
+});
+
+const STOCK_URL = "https://assets.st-note.com/production/uploads/images/8286527/b953.jpg";
+
+test("photo search lists gallery photos with a ready-to-use eyecatch reference", async () => {
+  const { client, calls } = fakeClient(
+    [
+      {
+        body: {
+          data: {
+            contents: [
+              {
+                id: 8286527,
+                stockPhotoImageId: 24215,
+                url: { original: STOCK_URL, stockPhotoThumb: `${STOCK_URL}?width=500` },
+                size: { width: 1280, height: 960 },
+                user: { urlname: "satoshi_st", nickname: "さっとん" },
+                keywords: [{ text: "コーヒー" }, { text: "カフェ" }],
+                isPublicDomainImage: false,
+                publicDomainImageDetail: {},
+                note: { key: "nd52324ce233c", name: "ちょっとの贅沢" },
+              },
+              {
+                stockPhotoImageId: 274805,
+                url: { original: "https://assets.st-note.com/production/uploads/images/48459381/pd.jpg" },
+                user: {},
+                isPublicDomainImage: true,
+                publicDomainImageDetail: { title: "The Four Philosophers", artistName: "ルーベンス", museumName: "メトロポリタン美術館" },
+              },
+              { stockPhotoImageId: 1 },
+            ],
+            isLastPage: false,
+            totalCount: 0,
+          },
+        },
+      },
+    ],
+    { _note_session_v5: "s" },
+  );
+  const r = await capture(() => main(["photo", "search", "コーヒー", "--limit", "3"], { client }));
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(calls[0].url.pathname, "/api/v2/stock_photo_images");
+  assert.equal(calls[0].url.searchParams.get("query"), "コーヒー");
+  assert.equal(calls[0].url.searchParams.get("size"), "3");
+  assert.equal(calls[0].url.searchParams.get("public_domain_only"), "false");
+  assert.equal(out.count, 2);
+  assert.equal(out.isLastPage, false);
+  assert.equal(out.skipped.count, 1);
+  assert.deepEqual(out.photos[0], {
+    eyecatch: `stock:24215:${STOCK_URL}`,
+    stockPhotoImageId: 24215,
+    thumbnailUrl: `${STOCK_URL}?width=500`,
+    originalUrl: STOCK_URL,
+    width: 1280,
+    height: 960,
+    keywords: ["コーヒー", "カフェ"],
+    credit: "satoshi_st",
+    creator: { urlname: "satoshi_st", nickname: "さっとん" },
+    artwork: null,
+    sourceNote: { key: "nd52324ce233c", title: "ちょっとの贅沢" },
+  });
+  assert.equal(out.photos[1].credit, "ルーベンス / メトロポリタン美術館");
+  assert.equal(out.photos[1].creator, null);
+});
+
+test("photo search needs login", async () => {
+  const { client, calls } = fakeClient([], null);
+  const r = await capture(() => main(["photo", "search", "猫"], { client }));
+  assert.notEqual(r.code, 0);
+  assert.match(r.stdout + r.stderr, /NOT_LOGGED_IN/);
+  assert.equal(calls.length, 0);
+});
+
+test("a gallery photo eyecatch is cropped by the CDN, set, then credited with a second save", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "note-cli-"));
+  const file = join(dir, "post.md");
+  await writeFile(file, `---\ntitle: T\neyecatch: stock:24215:${STOCK_URL}\n---\n\nbody\n`);
+  const { client, calls } = fakeClient(
+    [
+      { body: null, raw: pngBytes(1280, 670) },
+      { body: { data: { id: 42, key: "nabcdef123456" } } },
+      { body: { data: { result: true } } },
+      { body: { data: { url: "https://assets.st-note.com/eye.jpg" } } },
+      { body: { data: { result: true } } },
+    ],
+    { _note_session_v5: "s" },
+  );
+  const r = await capture(() => main(["draft", "create", file], { client }));
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.url.host}${c.url.pathname}`), [
+    `GET assets.st-note.com${new URL(STOCK_URL).pathname}`,
+    "POST note.com/api/v1/text_notes",
+    "POST note.com/api/v1/text_notes/draft_save",
+    "POST note.com/api/v1/image_upload/note_eyecatch",
+    "POST note.com/api/v1/text_notes/draft_save",
+  ]);
+  assert.equal(calls[0].url.searchParams.get("fit"), "crop");
+  assert.equal(calls[0].headers.Cookie, undefined);
+  assert.equal(calls[2].body.stock_photo_image_id, undefined);
+  assert.equal(calls[4].body.stock_photo_image_id, 24215);
+  assert.equal(calls[4].body.body, calls[2].body.body);
+  assert.deepEqual(out.eyecatch, { path: STOCK_URL, set: true, url: "https://assets.st-note.com/eye.jpg", stockPhotoImageId: 24215 });
+  assert.deepEqual(out.warnings, []);
+});
+
+test("a malformed gallery reference fails before anything is created", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "note-cli-"));
+  const file = join(dir, "post.md");
+  await writeFile(file, "# T\n\nbody");
+  const { client, calls } = fakeClient([], { _note_session_v5: "s" });
+  const r = await capture(() => main(["draft", "create", file, "--eyecatch", "stock:1:https://example.com/a.jpg"], { client }));
+  assert.notEqual(r.code, 0);
+  assert.match(r.stdout + r.stderr, /photo search/);
+  assert.equal(calls.length, 0);
 });

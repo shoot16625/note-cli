@@ -170,6 +170,22 @@ export class NoteClient {
     return res;
   }
 
+  /** GET a public file from note's image CDN as bytes. No cookies or note headers are sent. */
+  async download(url: string): Promise<{ bytes: Uint8Array<ArrayBuffer>; contentType: string | null }> {
+    const target = new URL(url);
+    if (target.protocol !== "https:") throw new CliError("API_ERROR", `Refusing to download from a non-https URL: ${url}`);
+    await this.throttle();
+    if (process.env.NOTE_CLI_DEBUG) console.error(`[note-cli] GET ${target.origin}${target.pathname}`);
+    let res: Response;
+    try {
+      res = await this.fetchImpl(target, { method: "GET", headers: { "User-Agent": USER_AGENT } });
+    } catch (e) {
+      throw new CliError("NETWORK_ERROR", `Download failed: ${(e as Error).message}`);
+    }
+    if (!res.ok) throw new CliError("API_ERROR", `Download of ${target.origin}${target.pathname} failed: HTTP ${res.status}.`, { status: res.status });
+    return { bytes: new Uint8Array(await res.arrayBuffer()), contentType: res.headers.get("content-type") };
+  }
+
   private async throttle(): Promise<void> {
     const wait = this.lastRequestAt + this.minIntervalMs - Date.now();
     if (wait > 0) await new Promise((r) => setTimeout(r, wait));
