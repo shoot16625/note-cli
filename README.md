@@ -45,6 +45,15 @@ curl -fsSL https://bun.sh/install | bash
 /plugin install note-cli@note-cli
 ```
 
+更新するときは、マーケットプレイスを更新してからプラグインを更新します。
+
+```bash
+claude plugin marketplace update note-cli
+claude plugin update note-cli@note-cli
+```
+
+セッション内では `/plugin marketplace update note-cli` を実行してから、`/plugin` → Installed → note-cli → **Update now** を選びます。更新後は `/reload-plugins` を実行するか、新しいセッションを始めると反映されます。`/plugin` → Marketplaces → note-cli → **Enable auto-update** で自動更新をオンにすることもできます（サードパーティのマーケットプレイスは最初はオフです）。
+
 ### Codex
 
 ```bash

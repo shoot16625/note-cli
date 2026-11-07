@@ -1,6 +1,6 @@
 {
   "name": "note-cli",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Write, publish, research and engage on note.com from AI coding agents via a bundled unofficial-API CLI",
   "contextFileName": "GEMINI.md"
 }
