@@ -7,6 +7,8 @@ export interface ImageFile {
   filename: string;
   mimeType: string;
   bytes: Uint8Array<ArrayBuffer>;
+  /** Set when the image comes from みんなのフォトギャラリー; note then credits its creator. */
+  stockPhotoImageId?: number;
 }
 
 /** note's editor rejects larger images. */
@@ -112,4 +114,44 @@ export function eyecatchRatioWarning(image: ImageFile): string | null {
   const ratio = size.width / size.height;
   if (Math.abs(ratio - EYECATCH_RATIO) / EYECATCH_RATIO <= 0.01) return null;
   return `Eyecatch ${image.filename} is ${size.width}x${size.height}; note requires a 1280:670 aspect ratio (e.g. 1280x670) and will likely reject it.`;
+}
+
+// ---------- みんなのフォトギャラリー (note's stock photo gallery) ----------
+
+const STOCK_PREFIX = "stock:";
+const STOCK_HOST = "assets.st-note.com";
+
+/** A gallery photo picked as an eyecatch: `stock:<stockPhotoImageId>:<original image URL>`. */
+export interface StockPhotoRef {
+  stockPhotoImageId: number;
+  url: string;
+}
+
+export function stockPhotoRef(stockPhotoImageId: number, url: string): string {
+  return `${STOCK_PREFIX}${stockPhotoImageId}:${url}`;
+}
+
+export function isStockPhotoRef(value: string): boolean {
+  return value.trim().startsWith(STOCK_PREFIX);
+}
+
+/** Parse the `eyecatch` value that `photo search` prints. */
+export function parseStockPhotoRef(value: string): StockPhotoRef {
+  const m = /^stock:(\d+):(https:\/\/\S+)$/.exec(value.trim());
+  const url = m ? URL.parse(m[2]) : null;
+  if (!m || !url || url.hostname !== STOCK_HOST) {
+    throw new CliError(
+      "INVALID_INPUT",
+      `Not a gallery photo reference: ${value}. Use the \`eyecatch\` value printed by \`note-cli photo search\` (stock:<id>:https://${STOCK_HOST}/...).`,
+    );
+  }
+  url.search = "";
+  return { stockPhotoImageId: Number(m[1]), url: url.toString() };
+}
+
+/** The gallery photo center-cropped to 1280x670 by note's image CDN, as the editor's crop does. */
+export function stockPhotoCropUrl(url: string): string {
+  const u = new URL(url);
+  u.search = new URLSearchParams({ width: "1280", height: "670", fit: "crop", format: "jpeg", quality: "95" }).toString();
+  return u.toString();
 }

@@ -6,7 +6,7 @@ import * as api from "./api.ts";
 import { CliError, NoteClient } from "./client.ts";
 import { attachmentMime, createEmbed, embedService, uploadAttachment, type Embed } from "./embeds.ts";
 import { browserLogin } from "./login.ts";
-import { eyecatchRatioWarning, isLocalImageRef, readImage, resolveImagePath, type ImageFile } from "./images.ts";
+import { eyecatchRatioWarning, isLocalImageRef, isStockPhotoRef, parseStockPhotoRef, readImage, resolveImagePath, type ImageFile } from "./images.ts";
 import { blockLinks, htmlToText, imageRefs, markdownToNoteHtml, parseArticle, visibleTextLength } from "./markdown.ts";
 import { tryNormalizeNote, type Skipped } from "./normalize.ts";
 import { buildPublishPayload, publishInBrowser, type CirclePermission, type PublishSettings } from "./publish.ts";
@@ -99,14 +99,14 @@ const COMMANDS: Record<string, Command> = {
     options: { title: { type: "string" }, eyecatch: { type: "string" }, "no-embed": { type: "boolean" }, "dry-run": { type: "boolean" } },
     args: 1,
     async run({ values, positionals, client }) {
-      const input = await readArticleInput(positionals[0], values);
+      const input = await readArticleInput(positionals[0], values, client);
       if (values["dry-run"]) return dryRunResult(input);
       // Images first, so a rejected image does not leave an empty draft behind.
       const imageUrls = await uploadImages(client, input);
       const draft = await api.createDraft(client, input.title);
       const article = await uploadAndConvert(client, input, draft.key, imageUrls);
       await api.saveDraft(client, draft.id, article);
-      const eyecatch = await applyEyecatch(client, draft.id, input.eyecatch);
+      const eyecatch = await applyEyecatch(client, draft.id, input.eyecatch, article);
       return {
         created: true,
         ...draft,
@@ -124,12 +124,12 @@ const COMMANDS: Record<string, Command> = {
     args: 2,
     async run({ values, positionals, client }) {
       const ref = v.noteIdOrKey(positionals[0]);
-      const input = await readArticleInput(positionals[1], values);
+      const input = await readArticleInput(positionals[1], values, client);
       if (values["dry-run"]) return dryRunResult(input);
       const { id, key } = await api.resolveNoteId(client, ref);
       const article = await uploadAndConvert(client, input, key);
       await api.saveDraft(client, id, article);
-      const eyecatch = await applyEyecatch(client, id, input.eyecatch);
+      const eyecatch = await applyEyecatch(client, id, input.eyecatch, article);
       return {
         updated: true,
         id,
@@ -185,6 +185,35 @@ const COMMANDS: Record<string, Command> = {
       const { id, key } = await api.resolveNoteId(client, ref);
       await api.deleteDraft(client, id);
       return { deleted: true, id, key };
+    },
+  },
+
+  "photo search": {
+    usage: "photo search [keyword...] [--public-domain] [--limit <n>] [--page <n>]",
+    summary:
+      "Search みんなのフォトギャラリー (free photos for covers, as in the editor's 記事にあう画像を選ぶ); pass an item's `eyecatch` to --eyecatch",
+    options: {
+      "public-domain": { type: "boolean" },
+      limit: { type: "string", default: "20" },
+      page: { type: "string", default: "1" },
+    },
+    async run({ values, positionals, client }) {
+      const query = positionals.join(" ").trim();
+      const size = int(values.limit, "limit");
+      const page = int(values.page, "page");
+      if (size < 1 || size > 100) throw new CliError("USAGE", "--limit must be between 1 and 100.");
+      if (page < 1) throw new CliError("USAGE", "--page must be 1 or more.");
+      const publicDomainOnly = values["public-domain"] === true;
+      const res = await api.searchStockPhotos(client, { query, page, size, publicDomainOnly });
+      return {
+        query,
+        ...(publicDomainOnly ? { publicDomainOnly } : {}),
+        page,
+        count: res.items.length,
+        isLastPage: res.isLastPage,
+        photos: res.items,
+        ...skippedField(res.skipped),
+      };
     },
   },
 
@@ -516,7 +545,7 @@ const COMMANDS: Record<string, Command> = {
       const membership = list(values.membership);
       if (membership.length) settings.circlePermissions = circlePermissions(membership, await api.membershipAccess(client));
       const timeoutSec = int(values.timeout, "timeout");
-      const input = positionals[1] ? await readArticleInput(positionals[1], values) : null;
+      const input = positionals[1] ? await readArticleInput(positionals[1], values, client) : null;
 
       if (values["dry-run"]) {
         const note = input
@@ -541,7 +570,7 @@ const COMMANDS: Record<string, Command> = {
       if (input) {
         const article = await uploadAndConvert(client, input, key);
         await api.saveDraft(client, id, article);
-        const eyecatch = await applyEyecatch(client, id, input.eyecatch);
+        const eyecatch = await applyEyecatch(client, id, input.eyecatch, article);
         note = { ...note, name: article.title, body: article.html };
         Object.assign(extra, imagesField(article.images, eyecatch, article.embeds));
         warnings.push(...article.warnings, ...eyecatch.warnings);
@@ -774,7 +803,7 @@ interface AttachmentFile {
  * before anything is uploaded. Image paths are relative to the Markdown file (or the cwd for stdin);
  * frontmatter `eyecatch:` is too, while --eyecatch is relative to the cwd.
  */
-async function readArticleInput(file: string, values: Values): Promise<ArticleInput> {
+async function readArticleInput(file: string, values: Values, client: NoteClient): Promise<ArticleInput> {
   const source = file === "-" ? await readStdin() : await readFile(file, "utf8").catch((e) => {
     throw new CliError("INVALID_INPUT", `Cannot read ${file}: ${(e as Error).message}`);
   });
@@ -792,13 +821,14 @@ async function readArticleInput(file: string, values: Values): Promise<ArticleIn
     images.set(src, image);
   }
 
-  const eyecatchPath =
-    typeof values.eyecatch === "string"
-      ? resolve(values.eyecatch)
-      : parsed.frontmatter.eyecatch
-        ? resolveImagePath(parsed.frontmatter.eyecatch, baseDir)
-        : null;
-  const eyecatch = eyecatchPath ? await readImage(eyecatchPath) : null;
+  const eyecatchFlag = typeof values.eyecatch === "string" ? values.eyecatch : null;
+  const eyecatchSpec = eyecatchFlag ?? parsed.frontmatter.eyecatch ?? null;
+  // A gallery photo (stock:<id>:<url> from `photo search`) is downloaded now, so a bad one fails before any upload.
+  const eyecatch = !eyecatchSpec
+    ? null
+    : isStockPhotoRef(eyecatchSpec)
+      ? await api.downloadStockPhoto(client, parseStockPhotoRef(eyecatchSpec))
+      : await readImage(eyecatchFlag ? resolve(eyecatchFlag) : resolveImagePath(eyecatchSpec, baseDir));
 
   const links = blockLinks(parsed.markdown);
   const attachments = new Map<string, AttachmentFile>();
@@ -824,7 +854,14 @@ function dryRunResult(input: ArticleInput) {
     html,
     bodyLength,
     images: [...input.images].map(([src, f]) => ({ src, path: f.path, mimeType: f.mimeType, bytes: f.bytes.length })),
-    eyecatch: input.eyecatch ? { path: input.eyecatch.path, mimeType: input.eyecatch.mimeType, bytes: input.eyecatch.bytes.length } : null,
+    eyecatch: input.eyecatch
+      ? {
+          path: input.eyecatch.path,
+          mimeType: input.eyecatch.mimeType,
+          bytes: input.eyecatch.bytes.length,
+          ...(input.eyecatch.stockPhotoImageId ? { stockPhotoImageId: input.eyecatch.stockPhotoImageId } : {}),
+        }
+      : null,
     ...(input.embedUrls.length ? { embeds: input.embedUrls.map((url) => ({ url, service: embedService(url) ?? "decided by note (link card or player)" })) } : {}),
     ...(input.attachments.size ? { attachments: [...input.attachments.values()].map((f) => ({ path: f.path, mimeType: f.mimeType, bytes: f.bytes.length })) } : {}),
     warnings: [
@@ -891,24 +928,43 @@ async function uploadAndConvert(client: NoteClient, input: ArticleInput, noteKey
 }
 
 interface EyecatchOutcome {
-  result: { path: string; set: boolean; url: string | null } | null;
+  result: { path: string; set: boolean; url: string | null; stockPhotoImageId?: number } | null;
   warnings: string[];
 }
 
 /**
  * Set the eyecatch after the draft is saved. A rejection is reported as a warning instead of an
- * error, because the draft itself was already saved and the caller needs its id.
+ * error, because the draft itself was already saved and the caller needs its id. A gallery photo is
+ * then credited by saving the draft once more with its id: setting an eyecatch clears the credit,
+ * and note drops a credit sent before the eyecatch exists.
  */
-async function applyEyecatch(client: NoteClient, noteId: number, file: ImageFile | null): Promise<EyecatchOutcome> {
+async function applyEyecatch(
+  client: NoteClient,
+  noteId: number,
+  file: ImageFile | null,
+  article: { title: string; html: string; bodyLength: number },
+): Promise<EyecatchOutcome> {
   if (!file) return { result: null, warnings: [] };
+  const stock = file.stockPhotoImageId ? { stockPhotoImageId: file.stockPhotoImageId } : {};
+  let url: string | null;
   try {
-    const { url } = await api.setEyecatch(client, noteId, file);
-    return { result: { path: file.path, set: true, url }, warnings: [] };
+    ({ url } = await api.setEyecatch(client, noteId, file));
   } catch (e) {
     if (!(e instanceof CliError) || e.code === "NOT_LOGGED_IN") throw e;
     return {
-      result: { path: file.path, set: false, url: null },
+      result: { path: file.path, set: false, url: null, ...stock },
       warnings: [`${e.message} The draft was saved without an eyecatch; fix the image and run \`draft update\` with --eyecatch.`],
+    };
+  }
+  if (!file.stockPhotoImageId) return { result: { path: file.path, set: true, url }, warnings: [] };
+  try {
+    await api.saveDraft(client, noteId, article, stock);
+    return { result: { path: file.path, set: true, url, ...stock }, warnings: [] };
+  } catch (e) {
+    if (!(e instanceof CliError) || e.code === "NOT_LOGGED_IN") throw e;
+    return {
+      result: { path: file.path, set: true, url },
+      warnings: [`The gallery photo is the eyecatch, but crediting its creator failed (${e.message}). Rerun \`draft update\` with the same --eyecatch.`],
     };
   }
 }

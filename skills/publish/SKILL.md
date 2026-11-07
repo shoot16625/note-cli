@@ -43,7 +43,7 @@ note-cli publish <key|url> [file.md] --yes [options]  # -> {published: true, url
   --disable-comments     # turn comments off (may need note premium)
   --no-notify            # do not send the subscriber notification
   --schedule <time>      # scheduled post, e.g. 2026-12-01T09:00+09:00 (needs note premium)
-  --eyecatch <image>     # with a file: set the cover image (1280:670)
+  --eyecatch <image>     # with a file: set the cover image (1280:670, or a `photo search` stock:... value)
   --no-embed             # with a file: keep bare URLs as links instead of embeds
 note-cli reserved                         # your scheduled articles
 note-cli unpublish <key|url> --yes        # back to draft (also cancels a scheduled post)

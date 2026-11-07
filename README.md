@@ -2,7 +2,7 @@
 
 [note.com](https://note.com) の**非公式** API を使った CLI とエージェント用プラグインです。Claude Code、Codex、Cursor、Gemini CLI などの AI コーディングエージェントから操作することを想定しています。すべてのコマンドは JSON を出力します。
 
-- **下書き**: Markdown（Obsidian 記法にも対応）を note のエディタ用 HTML に変換して下書き保存します。ローカル画像とアイキャッチもアップロードします。1行だけの URL は埋め込み（YouTube、X、note 記事、リンクカードなど）に、ローカルファイルへのリンクは添付ファイルになります。
+- **下書き**: Markdown（Obsidian 記法にも対応）を note のエディタ用 HTML に変換して下書き保存します。ローカル画像とアイキャッチもアップロードします。アイキャッチは「みんなのフォトギャラリー」から選ぶこともできます。1行だけの URL は埋め込み（YouTube、X、note 記事、リンクカードなど）に、ローカルファイルへのリンクは添付ファイルになります。
 - **公開**: ハッシュタグ、価格と有料エリア、目次、マガジン、メンバーシッププランを指定して公開します。予約投稿、非公開化、削除もできます。
 - **交流**: スキ、コメント、フォロー、自分のマガジンへの記事追加、通知とメンバーシップの確認ができます。
 - **リサーチ**: 記事・クリエイター・マガジン・ハッシュタグの検索、ハッシュタグ・カテゴリ・マガジン・コンテストの閲覧、記事本文・スキ・コメントの取得ができます。
@@ -179,6 +179,7 @@ note-cli draft update <key|url> article.md [--eyecatch cover.png] [--no-embed]
 note-cli draft get <key|url> [--html] [--max-chars N]
 note-cli draft list [--page N] [--status draft|published]
 note-cli draft delete <id|key|url> --yes
+note-cli photo search [キーワード] [--public-domain] [--limit N] [--page N]   # みんなのフォトギャラリー
 
 # 公開（ログインが必要。一時的にブラウザが開きます。後述）
 note-cli publish <key|url> [article.md] --yes [--hashtag T]... [--price YEN] [--refund] [--magazine KEY]... \
@@ -258,6 +259,8 @@ note で記事を公開するには reCAPTCHA v3 を通過する必要があり�
 タイトルは `--title`、フロントマターの `title:`、先頭の `# 見出し` の順で決まります。先頭の見出しをタイトルに使った場合、その見出しは本文から削除されます。
 
 画像のパスは Markdown ファイルからの相対パスです（stdin から読み込む場合はカレントディレクトリが基準）。同じ画像を複数回使っても、アップロードは 1 回だけです。アイキャッチ（カバー画像）は `--eyecatch`（カレントディレクトリ基準）またはフロントマターの `eyecatch:`（Markdown ファイル基準）で指定します。note が受け付けるアイキャッチは縦横比 1280:670（1280x670 など）のものだけです。`--dry-run` はすべての画像を読み込んで検証しますが、アップロードはしません。note がアイキャッチを拒否した場合でも下書きは保存され、出力に警告が含まれます。
+
+エディタの「記事にあう画像を選ぶ」と同じく、「みんなのフォトギャラリー」の画像をアイキャッチにできます。`note-cli photo search 富士山` で探し（`--public-domain` で「世界の美術館」の作品）、結果の `eyecatch` の値（`stock:<id>:<url>`）を `--eyecatch` またはフロントマターの `eyecatch:` に渡します。画像は 1280x670 に中央で切り抜かれ、提供者のクレジットはエディタで選んだ場合と同じく note が自動で表示します。
 
 ### 環境変数
 

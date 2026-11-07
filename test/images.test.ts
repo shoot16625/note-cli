@@ -3,7 +3,18 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "bun:test";
-import { eyecatchRatioWarning, imageSize, isLocalImageRef, readImage, resolveImagePath, sniffImageType } from "../src/images.ts";
+import {
+  eyecatchRatioWarning,
+  imageSize,
+  isLocalImageRef,
+  isStockPhotoRef,
+  parseStockPhotoRef,
+  readImage,
+  resolveImagePath,
+  sniffImageType,
+  stockPhotoCropUrl,
+  stockPhotoRef,
+} from "../src/images.ts";
 
 function png(width: number, height: number): Uint8Array<ArrayBuffer> {
   const b = new Uint8Array(33);
@@ -59,4 +70,18 @@ test("readImage rejects missing files and non-images", async () => {
   const img = await readImage(join(dir, "ok.png"));
   assert.equal(img.mimeType, "image/png");
   assert.equal(img.filename, "ok.png");
+});
+
+test("gallery photo refs round-trip and only point at note's image CDN", () => {
+  const url = "https://assets.st-note.com/production/uploads/images/8286527/b953.jpg";
+  const ref = stockPhotoRef(24215, url);
+  assert.equal(ref, `stock:24215:${url}`);
+  assert.ok(isStockPhotoRef(` ${ref}`));
+  assert.ok(!isStockPhotoRef("cover.png"));
+  assert.deepEqual(parseStockPhotoRef(ref), { stockPhotoImageId: 24215, url });
+  assert.deepEqual(parseStockPhotoRef(`${ref}?width=500`), { stockPhotoImageId: 24215, url });
+  for (const bad of ["stock:24215", "stock:x:" + url, "stock:1:https://evil.example/a.jpg", "stock:1:http://assets.st-note.com/a.jpg"]) {
+    assert.throws(() => parseStockPhotoRef(bad), /photo search/, bad);
+  }
+  assert.equal(stockPhotoCropUrl(url), `${url}?width=1280&height=670&fit=crop&format=jpeg&quality=95`);
 });
